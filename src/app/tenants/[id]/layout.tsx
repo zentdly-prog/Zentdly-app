@@ -7,6 +7,7 @@ const TABS = [
   { href: "/courts", label: "Canchas" },
   { href: "/whatsapp", label: "WhatsApp" },
   { href: "/bot", label: "Bot / IA" },
+  { href: "/google", label: "Google" },
 ];
 
 export default async function TenantLayout({
