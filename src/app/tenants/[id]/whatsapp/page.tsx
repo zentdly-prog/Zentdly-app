@@ -10,7 +10,5 @@ export default async function WhatsAppPage({
 }) {
   const { id } = await params;
   const config = await getWhatsAppConfig(id);
-  const alreadyConnected = false; // state is checked live when button is pressed
-
-  return <WhatsAppClient tenantId={id} alreadyConnected={alreadyConnected} />;
+  return <WhatsAppClient tenantId={id} initialConfig={config} />;
 }
