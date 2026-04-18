@@ -319,7 +319,7 @@ export async function runAgent(
   // Allow up to 3 tool call rounds
   for (let round = 0; round < 3; round++) {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",
       temperature: 0.4,
       tools: TOOLS,
       tool_choice: "auto",
@@ -350,7 +350,7 @@ export async function runAgent(
 
   // Fallback after max rounds
   const finalResponse = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: "gpt-4o-mini",
     temperature: 0.4,
     messages,
   });

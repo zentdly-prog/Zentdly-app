@@ -19,6 +19,8 @@ export async function GET(req: NextRequest) {
   return new NextResponse("Forbidden", { status: 403 });
 }
 
+export const maxDuration = 60; // seconds — requires Vercel Pro, ignored on Hobby but safe to set
+
 // Incoming messages (POST)
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
@@ -34,9 +36,11 @@ export async function POST(req: NextRequest) {
   if (payload.event === "messages.upsert") {
     const msg = parseEvolutionPayload(payload);
     if (msg) {
-      handleEvolutionMessage(msg).catch((err) => {
+      try {
+        await handleEvolutionMessage(msg);
+      } catch (err) {
         console.error("[evolution webhook] error:", err);
-      });
+      }
     }
     return new NextResponse("OK", { status: 200 });
   }

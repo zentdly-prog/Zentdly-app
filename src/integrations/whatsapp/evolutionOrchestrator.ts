@@ -53,15 +53,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
 
   if (!conversation) return;
 
-  // ── 4. Save inbound message ─────────────────────────────────────────────────
-  await db.from("messages").insert({
-    conversation_id: conversation.id,
-    direction: "inbound",
-    content: msg.text,
-    raw_payload: { messageId: msg.messageId },
-  });
-
-  // ── 5. Build context + history ──────────────────────────────────────────────
+  // ── 4. Build context + history BEFORE saving inbound (avoids duplicate) ────
   const { data: tenant } = await db
     .from("tenants")
     .select("timezone")
@@ -71,6 +63,14 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   const timezone = tenant?.timezone ?? "America/Argentina/Buenos_Aires";
 
   const { systemPrompt, chatHistory } = await buildAgentContext(db, tenantId, conversation.id);
+
+  // ── 5. Save inbound message ─────────────────────────────────────────────────
+  await db.from("messages").insert({
+    conversation_id: conversation.id,
+    direction: "inbound",
+    content: msg.text,
+    raw_payload: { messageId: msg.messageId },
+  });
 
   // ── 6. Run AI agent ─────────────────────────────────────────────────────────
   const reply = await runAgent(
