@@ -46,60 +46,88 @@ export async function saveWhatsAppConfig(_prev: unknown, formData: FormData) {
   return { ok: true };
 }
 
-export async function getEvolutionQR(tenantId: string): Promise<{ qr?: string; connected?: boolean; error?: string }> {
+const EVOLUTION_URL = "https://evolution-api-6ufp.onrender.com";
+const EVOLUTION_KEY = "zentdly-evolution-key-2024";
+
+export async function connectEvolutionWhatsApp(
+  tenantId: string
+): Promise<{ qr?: string; connected?: boolean; error?: string }> {
   try {
     const db = createServerClient();
-    const { data: config } = await db
-      .from("whatsapp_config")
-      .select("evolution_api_url, evolution_api_key, evolution_instance_name")
-      .eq("tenant_id", tenantId)
+
+    // Get tenant slug to use as instance name
+    const { data: tenant } = await db
+      .from("tenants")
+      .select("slug")
+      .eq("id", tenantId)
       .single();
 
-    if (!config?.evolution_api_url || !config?.evolution_api_key || !config?.evolution_instance_name) {
-      return { error: "Guardá la URL, API Key e Instance Name antes de generar el QR." };
-    }
+    if (!tenant?.slug) return { error: "No se encontró el negocio." };
 
-    const baseUrl = config.evolution_api_url.replace(/\/$/, "");
-    const instanceName = config.evolution_instance_name;
-    const apiKey = config.evolution_api_key;
+    const instanceName = tenant.slug;
 
-    // Check if instance already exists and is connected
-    const statusRes = await fetch(`${baseUrl}/instance/fetchInstances?instanceName=${instanceName}`, {
-      headers: { "apikey": apiKey },
-    }).catch(() => null);
+    // Upsert whatsapp_config so it's always in sync
+    await db.from("whatsapp_config").upsert(
+      {
+        tenant_id: tenantId,
+        provider: "evolution",
+        evolution_api_url: EVOLUTION_URL,
+        evolution_api_key: EVOLUTION_KEY,
+        evolution_instance_name: instanceName,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "tenant_id" }
+    );
+
+    // Check if already connected
+    const statusRes = await fetch(
+      `${EVOLUTION_URL}/instance/fetchInstances?instanceName=${instanceName}`,
+      { headers: { apikey: EVOLUTION_KEY } }
+    ).catch(() => null);
 
     if (statusRes?.ok) {
-      const instances = await statusRes.json().catch(() => []);
-      const list = Array.isArray(instances) ? instances : [instances];
-      const existing = list.find((i: { instance?: { instanceName?: string; state?: string } }) =>
-        i?.instance?.instanceName === instanceName
+      const list = await statusRes.json().catch(() => []);
+      const instances = Array.isArray(list) ? list : [list];
+      const found = instances.find(
+        (i: { instance?: { instanceName?: string; state?: string } }) =>
+          i?.instance?.instanceName === instanceName
       );
-      if (existing?.instance?.state === "open") {
-        return { connected: true };
-      }
+      if (found?.instance?.state === "open") return { connected: true };
     }
 
-    // Create instance (idempotent — OK if already exists)
-    await fetch(`${baseUrl}/instance/create`, {
+    // Create instance (idempotent)
+    await fetch(`${EVOLUTION_URL}/instance/create`, {
       method: "POST",
-      headers: { "apikey": apiKey, "Content-Type": "application/json" },
+      headers: { apikey: EVOLUTION_KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ instanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" }),
     }).catch(() => null);
 
-    // Get QR code
-    const res = await fetch(`${baseUrl}/instance/connect/${instanceName}`, {
-      headers: { "apikey": apiKey },
+    // Get QR
+    const res = await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
+      headers: { apikey: EVOLUTION_KEY },
     });
 
-    if (!res.ok) return { error: `Evolution API respondió con error ${res.status}. Verificá que el servidor esté corriendo.` };
+    if (!res.ok)
+      return {
+        error: `El servidor de Evolution respondió con error ${res.status}. Puede estar iniciando, intentá en unos segundos.`,
+      };
+
     const json = await res.json();
     const qr = json?.base64 ?? json?.qrcode?.base64 ?? json?.data?.qrcode ?? json?.code;
 
-    if (!qr) return { error: "No se pudo obtener el QR. La instancia puede estar iniciando, intentá de nuevo en unos segundos." };
+    if (!qr)
+      return {
+        error: "El servidor está iniciando. Esperá unos segundos y volvé a intentar.",
+      };
+
     return { qr };
   } catch (e) {
     return { error: e instanceof Error ? e.message : "Error de conexión con Evolution API." };
   }
+}
+
+export async function getEvolutionQR(tenantId: string): Promise<{ qr?: string; connected?: boolean; error?: string }> {
+  return connectEvolutionWhatsApp(tenantId);
 }
 
 export async function saveBotPrompt(_prev: unknown, formData: FormData) {
