@@ -46,7 +46,7 @@ export async function saveWhatsAppConfig(_prev: unknown, formData: FormData) {
   return { ok: true };
 }
 
-const EVOLUTION_URL = "https://evolution-api-6ufp.onrender.com";
+const EVOLUTION_URL = "https://evolution-api-production-be7b.up.railway.app";
 const EVOLUTION_KEY = "zentdly-evolution-key-2024";
 
 export async function connectEvolutionWhatsApp(
