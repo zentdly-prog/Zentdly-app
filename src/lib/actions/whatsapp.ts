@@ -90,21 +90,31 @@ export async function connectEvolutionWhatsApp(
       if (stateJson?.instance?.state === "open") return { connected: true };
     }
 
-    // Create instance (idempotent — v1.8.2 returns QR in create response)
+    // Try to create instance — v1.8.2 returns QR in create response
     const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
       method: "POST",
       headers: { apikey: EVOLUTION_KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ instanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" }),
     }).catch(() => null);
 
-    if (!createRes?.ok)
+    if (createRes?.ok) {
+      const json = await createRes.json();
+      const qr = json?.qrcode?.base64 ?? json?.base64 ?? json?.qrcode?.code;
+      if (qr) return { qr };
+    }
+
+    // Instance already exists — fetch QR from connect endpoint
+    const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
+      headers: { apikey: EVOLUTION_KEY },
+    }).catch(() => null);
+
+    if (!connectRes?.ok)
       return {
-        error: `El servidor de Evolution respondió con error ${createRes?.status ?? "desconocido"}. Puede estar iniciando, intentá en unos segundos.`,
+        error: `No se pudo obtener el QR (error ${connectRes?.status ?? "desconocido"}). Intentá de nuevo en unos segundos.`,
       };
 
-    const json = await createRes.json();
-    // v1.8.2: QR is in json.qrcode.base64
-    const qr = json?.qrcode?.base64 ?? json?.base64 ?? json?.qrcode?.code;
+    const connectJson = await connectRes.json();
+    const qr = connectJson?.base64 ?? connectJson?.qrcode?.base64 ?? connectJson?.code;
 
     if (!qr)
       return {
