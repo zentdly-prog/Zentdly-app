@@ -96,6 +96,34 @@ export default function GoogleClient({
             </label>
           </div>
 
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 space-y-2">
+            <p className="font-semibold">Cómo conectar el calendario (2 pasos):</p>
+            <div className="space-y-1">
+              <p className="font-medium text-amber-800">Paso 1 — Compartir el calendario con la cuenta de servicio</p>
+              <ol className="list-decimal list-inside space-y-0.5 text-amber-700 pl-1">
+                <li>Abrí <strong>calendar.google.com</strong></li>
+                <li>En el panel izquierdo, encontrá el calendario que querés usar</li>
+                <li>Hacé clic en los <strong>tres puntos</strong> al lado del nombre → <strong>Configuración y uso compartido</strong></li>
+                <li>En la sección <strong>"Compartir con determinadas personas"</strong>, hacé clic en <strong>+ Agregar personas</strong></li>
+                <li>Pegá el <code className="bg-amber-100 px-0.5 rounded">client_email</code> del JSON que cargaste arriba</li>
+                <li>En permisos elegí <strong>"Realizar cambios en eventos"</strong></li>
+                <li>Hacé clic en <strong>Enviar</strong></li>
+              </ol>
+            </div>
+            <div className="space-y-1">
+              <p className="font-medium text-amber-800">Paso 2 — Copiar el Calendar ID</p>
+              <ol className="list-decimal list-inside space-y-0.5 text-amber-700 pl-1">
+                <li>En la misma pantalla de configuración, bajá hasta la sección <strong>"Integrar calendario"</strong></li>
+                <li>Copiá el valor de <strong>"ID del calendario"</strong> — termina en <code className="bg-amber-100 px-0.5 rounded">@group.calendar.google.com</code></li>
+                <li>Si querés usar tu calendario personal principal, usá <code className="bg-amber-100 px-0.5 rounded">primary</code></li>
+                <li>Pegalo en el campo de abajo</li>
+              </ol>
+            </div>
+            <p className="text-amber-600 text-[11px] pt-1">
+              ⚠️ Si saltás el Paso 1, el test de conexión va a fallar con error de permisos.
+            </p>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Calendar ID</label>
             <input
@@ -106,7 +134,7 @@ export default function GoogleClient({
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500"
             />
             <p className="mt-1 text-xs text-gray-400">
-              Lo encontrás en Google Calendar → Configuración del calendario → Integrar calendario.
+              Configuración del calendario → Integrar calendario → ID del calendario.
             </p>
           </div>
         </div>
