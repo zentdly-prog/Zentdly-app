@@ -36,11 +36,10 @@ export async function POST(req: NextRequest) {
   if (payload.event === "messages.upsert") {
     const msg = parseEvolutionPayload(payload);
     if (msg) {
-      try {
-        await handleEvolutionMessage(msg);
-      } catch (err) {
+      // Fire-and-forget: return 200 immediately so Evolution doesn't retry/timeout
+      handleEvolutionMessage(msg).catch((err) => {
         console.error("[evolution webhook] error:", err);
-      }
+      });
     }
     return new NextResponse("OK", { status: 200 });
   }
