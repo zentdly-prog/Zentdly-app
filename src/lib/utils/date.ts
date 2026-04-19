@@ -23,7 +23,15 @@ export function generateSlots(
 ): Array<{ start: Date; end: Date }> {
   const slots: Array<{ start: Date; end: Date }> = [];
   const start = fromZonedTime(`${date}T${openTime}:00`, tz);
-  const end = fromZonedTime(`${date}T${closeTime}:00`, tz);
+
+  // Overnight support: if close ≤ open, close is on the next calendar day
+  const isOvernight = closeTime <= openTime;
+  const closeDate = isOvernight
+    ? new Date(new Date(`${date}T12:00:00Z`).getTime() + 86400000)
+        .toISOString()
+        .slice(0, 10)
+    : date;
+  const end = fromZonedTime(`${closeDate}T${closeTime}:00`, tz);
 
   let cursor = start;
   while (addMinutes(cursor, slotDurationMinutes) <= end) {

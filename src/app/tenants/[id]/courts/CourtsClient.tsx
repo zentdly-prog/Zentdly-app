@@ -74,7 +74,8 @@ export default function CourtsClient({
   const slotsPerDay = (court: Court) => {
     const [oh, om] = court.open_time.split(":").map(Number);
     const [ch, cm] = court.close_time.split(":").map(Number);
-    const totalMin = (ch * 60 + cm) - (oh * 60 + om);
+    let totalMin = (ch * 60 + cm) - (oh * 60 + om);
+    if (totalMin <= 0) totalMin += 24 * 60; // overnight
     return Math.floor(totalMin / court.slot_duration_minutes) * court.quantity;
   };
 
