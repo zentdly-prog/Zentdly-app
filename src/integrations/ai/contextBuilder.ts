@@ -1,6 +1,6 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { format, toZonedTime } from "date-fns-tz";
-import { addMinutes, parseISO, startOfDay, endOfDay } from "date-fns";
+import { formatInTimeZone, fromZonedTime, toZonedTime } from "date-fns-tz";
+import { addMinutes, parseISO } from "date-fns";
 
 const DAYS_ES = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
 const MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
@@ -39,16 +39,17 @@ export async function buildAgentContext(
   tenantId: string,
   conversationId: string
 ): Promise<{ systemPrompt: string; chatHistory: { role: "user" | "assistant"; content: string }[] }> {
-  const [tenant, courts, todayReservations, history] = await Promise.all([
-    fetchTenant(db, tenantId),
+  const tenant = await fetchTenant(db, tenantId);
+  const tz = tenant?.timezone ?? "America/Argentina/Buenos_Aires";
+
+  const [courts, todayReservations, history] = await Promise.all([
     fetchCourts(db, tenantId),
-    fetchTodayReservations(db, tenantId),
+    fetchTodayReservations(db, tenantId, tz),
     fetchTodayHistory(db, conversationId),
   ]);
 
-  const tz = tenant?.timezone ?? "America/Argentina/Buenos_Aires";
-  const now = toZonedTime(new Date(), tz);
-  const todayDow = now.getDay(); // 0=Sun 6=Sat
+  const now = new Date();
+  const todayDow = toZonedTime(now, tz).getDay(); // 0=Sun 6=Sat in tenant tz
 
   const courtsInfo = buildCourtsSection(courts, todayDow, now, todayReservations, tz);
   const systemPrompt = buildSystemPrompt(tenant, courtsInfo, now, tz);
@@ -80,9 +81,12 @@ async function fetchCourts(db: SupabaseClient, tenantId: string): Promise<CourtT
 
 // ─── Reservations today ───────────────────────────────────────────────────────
 
-async function fetchTodayReservations(db: SupabaseClient, tenantId: string): Promise<ExistingReservation[]> {
-  const todayStart = startOfDay(new Date()).toISOString();
-  const todayEnd = endOfDay(new Date()).toISOString();
+async function fetchTodayReservations(db: SupabaseClient, tenantId: string, tz: string): Promise<ExistingReservation[]> {
+  const now = new Date();
+  const todayStr = formatInTimeZone(now, tz, "yyyy-MM-dd");
+  // Wide window: local midnight to next day noon UTC — covers overnight courts (e.g. 08:00–03:00)
+  const todayStart = fromZonedTime(`${todayStr}T00:00:00`, tz).toISOString();
+  const todayEnd = new Date(fromZonedTime(`${todayStr}T00:00:00`, tz).getTime() + 30 * 3600 * 1000).toISOString();
 
   const { data } = await db
     .from("reservations")
@@ -100,7 +104,7 @@ async function fetchTodayHistory(
   db: SupabaseClient,
   conversationId: string
 ): Promise<{ role: "user" | "assistant"; content: string }[]> {
-  const todayStart = startOfDay(new Date()).toISOString();
+  const todayStart = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
 
   const { data } = await db
     .from("messages")
@@ -168,30 +172,31 @@ function getAvailableSlots(
   reservations: ExistingReservation[],
   tz: string
 ): string[] {
-  const [openH, openM] = court.open_time.split(":").map(Number);
-  const [closeH, closeM] = court.close_time.split(":").map(Number);
+  const todayStr = formatInTimeZone(now, tz, "yyyy-MM-dd");
 
-  // Build slot start times for today
-  const todayStr = format(now, "yyyy-MM-dd", { timeZone: tz });
-  const slotStart = new Date(`${todayStr}T${court.open_time}`);
-  const slotEnd = new Date(`${todayStr}T${court.close_time}`);
+  // Overnight support: if close ≤ open, close is on the next calendar day
+  const isOvernight = court.close_time <= court.open_time;
+  const nextDayStr = formatInTimeZone(
+    new Date(fromZonedTime(`${todayStr}T00:00:00`, tz).getTime() + 86400000),
+    tz, "yyyy-MM-dd"
+  );
+  const closeDateStr = isOvernight ? nextDayStr : todayStr;
 
-  // Reservations for this court type today
+  const slotStart = fromZonedTime(`${todayStr}T${court.open_time}:00`, tz);
+  const slotEnd   = fromZonedTime(`${closeDateStr}T${court.close_time}:00`, tz);
+
   const courtReservations = reservations.filter((r) => r.court_type_id === court.id);
-
   const available: string[] = [];
   let cursor = slotStart;
 
   while (addMinutes(cursor, court.slot_duration_minutes) <= slotEnd) {
     const slotEndTime = addMinutes(cursor, court.slot_duration_minutes);
 
-    // Skip past slots (only show future ones with 10min buffer)
     if (slotEndTime <= addMinutes(now, 10)) {
       cursor = slotEndTime;
       continue;
     }
 
-    // Count how many courts are taken at this time
     const taken = courtReservations.filter((r) => {
       const resStart = parseISO(r.starts_at);
       const resEnd = parseISO(r.ends_at);
@@ -199,14 +204,11 @@ function getAvailableSlots(
     }).length;
 
     if (taken < court.quantity) {
-      available.push(format(cursor, "HH:mm", { timeZone: tz }));
+      available.push(formatInTimeZone(cursor, tz, "HH:mm"));
     }
 
     cursor = slotEndTime;
   }
-
-  // Suppress warnings about unused vars
-  void openH; void openM; void closeH; void closeM;
 
   return available;
 }
@@ -223,11 +225,12 @@ function buildSystemPrompt(
   const address = tenant?.address ? `Dirección: ${tenant.address}` : "";
   const customPrompt = tenant?.bot_prompt?.trim() ?? "";
 
-  const dow = now.getDay();
-  const dom = now.getDate();
-  const month = MONTHS_ES[now.getMonth()];
-  const year = now.getFullYear();
-  const timeStr = format(now, "HH:mm", { timeZone: tz });
+  const nowLocal = toZonedTime(now, tz);
+  const dow = nowLocal.getDay();
+  const dom = nowLocal.getDate();
+  const month = MONTHS_ES[nowLocal.getMonth()];
+  const year = nowLocal.getFullYear();
+  const timeStr = formatInTimeZone(now, tz, "HH:mm");
   const dayStr = DAYS_ES[dow];
 
   const dateBlock = `Hoy es ${dayStr} ${dom} de ${month} de ${year}, son las ${timeStr} hs (zona horaria: ${tz}).`;

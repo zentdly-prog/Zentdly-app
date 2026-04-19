@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { SupabaseClient } from "@supabase/supabase-js";
-import { format, toZonedTime, fromZonedTime } from "date-fns-tz";
-import { addMinutes, parseISO, startOfDay, endOfDay } from "date-fns";
+import { formatInTimeZone, fromZonedTime, toZonedTime } from "date-fns-tz";
+import { addMinutes, parseISO } from "date-fns";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -109,8 +109,8 @@ async function checkAvailability(
   sportName: string | undefined,
   tz: string
 ): Promise<string> {
-  const targetDate = new Date(date + "T12:00:00"); // noon to avoid timezone shifts
-  const dow = toZonedTime(targetDate, tz).getDay();
+  // Use noon UTC to safely determine day-of-week in any timezone
+  const dow = toZonedTime(new Date(`${date}T12:00:00Z`), tz).getDay();
 
   let query = db
     .from("court_types")
@@ -125,8 +125,9 @@ async function checkAvailability(
   const { data: courts } = await query;
   if (!courts?.length) return "No hay canchas configuradas para ese deporte.";
 
-  const dayStart = new Date(date + "T00:00:00Z").toISOString();
-  const dayEnd = new Date(date + "T23:59:59Z").toISOString();
+  // Timezone-aware window: local midnight to +30h (covers overnight courts)
+  const dayStart = fromZonedTime(`${date}T00:00:00`, tz).toISOString();
+  const dayEnd = new Date(fromZonedTime(`${date}T00:00:00`, tz).getTime() + 30 * 3600 * 1000).toISOString();
   const { data: reservations } = await db
     .from("reservations")
     .select("starts_at, ends_at, court_type_id, status")
@@ -135,7 +136,7 @@ async function checkAvailability(
     .gte("starts_at", dayStart)
     .lte("starts_at", dayEnd);
 
-  const now = toZonedTime(new Date(), tz);
+  const now = new Date();
   const lines: string[] = [`Disponibilidad para el ${date}:`];
 
   for (const court of courts) {
@@ -164,12 +165,21 @@ function getSlotsForDay(
   reservations: { starts_at: string; ends_at: string; court_type_id: string }[],
   tz: string
 ): string[] {
-  const slotStart = new Date(`${date}T${court.open_time}`);
-  const slotEnd = new Date(`${date}T${court.close_time}`);
+  // Overnight support: if close ≤ open, close is on the next calendar day
+  const isOvernight = court.close_time <= court.open_time;
+  const nextDayStr = formatInTimeZone(
+    new Date(fromZonedTime(`${date}T00:00:00`, tz).getTime() + 86400000),
+    tz, "yyyy-MM-dd"
+  );
+  const closeDateStr = isOvernight ? nextDayStr : date;
+
+  const slotStart = fromZonedTime(`${date}T${court.open_time}:00`, tz);
+  const slotEnd   = fromZonedTime(`${closeDateStr}T${court.close_time}:00`, tz);
+
   const courtReservations = reservations.filter((r) => r.court_type_id === court.id);
   const available: string[] = [];
   let cursor = slotStart;
-  const isToday = date === format(now, "yyyy-MM-dd", { timeZone: tz });
+  const isToday = date === formatInTimeZone(now, tz, "yyyy-MM-dd");
 
   while (addMinutes(cursor, court.slot_duration_minutes) <= slotEnd) {
     const end = addMinutes(cursor, court.slot_duration_minutes);
@@ -181,7 +191,7 @@ function getSlotsForDay(
       return rs < end && re > cursor;
     }).length;
 
-    if (taken < court.quantity) available.push(format(cursor, "HH:mm", { timeZone: tz }));
+    if (taken < court.quantity) available.push(formatInTimeZone(cursor, tz, "HH:mm"));
     cursor = end;
   }
 
@@ -280,7 +290,7 @@ async function listReservations(
   return data.map((r) => {
     const ct = r.court_types;
     const sport = (Array.isArray(ct) ? (ct[0] as { sport_name: string } | undefined) : (ct as { sport_name: string } | null))?.sport_name ?? "Cancha";
-    const start = format(toZonedTime(parseISO(r.starts_at), tz), "dd/MM HH:mm", { timeZone: tz });
+    const start = formatInTimeZone(parseISO(r.starts_at), tz, "dd/MM HH:mm");
     return `• ${sport} – ${start} hs (ID: ${r.id.slice(0, 8)})`;
   }).join("\n");
 }
