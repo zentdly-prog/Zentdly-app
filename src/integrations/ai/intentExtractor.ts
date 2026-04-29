@@ -27,10 +27,15 @@ JSON esperado:
 }`;
 
 export class IntentExtractor {
-  private readonly client: OpenAI;
+  private client: OpenAI | null = null;
 
-  constructor() {
-    this.client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  private getClient(): OpenAI {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error("Missing OPENAI_API_KEY environment variable");
+    }
+
+    this.client ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    return this.client;
   }
 
   async extract(
@@ -40,7 +45,7 @@ export class IntentExtractor {
     const today = new Date().toISOString().slice(0, 10);
     const systemPrompt = SYSTEM_PROMPT.replace("{TODAY}", today).replace("{TIMEZONE}", timezone);
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.getClient().chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
       response_format: { type: "json_object" },
@@ -84,7 +89,7 @@ export class IntentExtractor {
 
     const prompt = `Eres un asistente simpático de reservas deportivas. Contexto: ${context}. ${needsStr} Respondé en español rioplatense, de forma breve y amigable.`;
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.getClient().chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.7,
       messages: [{ role: "user", content: prompt }],

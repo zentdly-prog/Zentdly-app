@@ -4,7 +4,16 @@ import { formatInTimeZone, fromZonedTime, toZonedTime } from "date-fns-tz";
 import { addMinutes, parseISO } from "date-fns";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openaiClient: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("Missing OPENAI_API_KEY environment variable");
+  }
+
+  openaiClient ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openaiClient;
+}
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
@@ -320,6 +329,7 @@ export async function runAgent(
   userMessage: string,
   deps: AgentDeps
 ): Promise<string> {
+  const openai = getOpenAIClient();
   const messages: ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
     ...chatHistory,
