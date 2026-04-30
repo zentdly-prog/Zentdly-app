@@ -84,7 +84,7 @@ export default function WhatsAppClient({
   // Meta form state
   const [metaState, metaAction] = useActionState(saveWhatsAppConfig, null);
 
-  const webhookUrl = `https://zentdlyw.vercel.app/api/webhooks/whatsapp`;
+  const webhookUrl = `https://zentdly-app.vercel.app/api/webhooks/whatsapp`;
 
   function handleGetQr() {
     setQr(null);

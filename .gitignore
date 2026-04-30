@@ -42,3 +42,8 @@ next-env.d.ts
 .vercel
 .claude/settings.local.json
 .env.local
+
+# local/generated integration exports
+/supabase/.temp/
+/n8n/*.workflow.json
+/.claude/skills/CONEXIONES.md
