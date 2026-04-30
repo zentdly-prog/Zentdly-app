@@ -94,11 +94,13 @@ export async function connectEvolutionWhatsApp(
       method: "POST",
       headers: { apikey: evolutionKey, "Content-Type": "application/json" },
       body: JSON.stringify({
-        url: webhookUrl,
-        enabled: true,
-        webhookByEvents: false,
-        webhookBase64: false,
-        events: ["MESSAGES_UPSERT"],
+        webhook: {
+          url: webhookUrl,
+          enabled: true,
+          webhookByEvents: false,
+          webhookBase64: false,
+          events: ["MESSAGES_UPSERT"],
+        },
       }),
     }).catch(() => null);
 
