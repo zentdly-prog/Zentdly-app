@@ -46,14 +46,23 @@ export async function saveWhatsAppConfig(_prev: unknown, formData: FormData) {
   return { ok: true };
 }
 
-const EVOLUTION_URL = "https://evolution-api-production-be7b.up.railway.app";
-const EVOLUTION_KEY = "zentdly-evolution-key-2024";
+function getEvolutionConfig() {
+  const url = process.env.EVOLUTION_API_URL;
+  const key = process.env.EVOLUTION_API_KEY;
+
+  if (!url || !key) {
+    throw new Error("Faltan EVOLUTION_API_URL o EVOLUTION_API_KEY.");
+  }
+
+  return { url: url.replace(/\/$/, ""), key };
+}
 
 export async function connectEvolutionWhatsApp(
   tenantId: string
 ): Promise<{ qr?: string; connected?: boolean; error?: string }> {
   try {
     const db = createServerClient();
+    const { url: evolutionUrl, key: evolutionKey } = getEvolutionConfig();
 
     // Get tenant slug to use as instance name
     const { data: tenant } = await db
@@ -71,8 +80,8 @@ export async function connectEvolutionWhatsApp(
       {
         tenant_id: tenantId,
         provider: "evolution",
-        evolution_api_url: EVOLUTION_URL,
-        evolution_api_key: EVOLUTION_KEY,
+        evolution_api_url: evolutionUrl,
+        evolution_api_key: evolutionKey,
         evolution_instance_name: instanceName,
         updated_at: new Date().toISOString(),
       },
@@ -81,9 +90,9 @@ export async function connectEvolutionWhatsApp(
 
     // Configure Evolution webhook to point to our endpoint
     const webhookUrl = `${process.env.APP_URL}/api/webhooks/whatsapp`;
-    await fetch(`${EVOLUTION_URL}/webhook/set/${instanceName}`, {
+    await fetch(`${evolutionUrl}/webhook/set/${instanceName}`, {
       method: "POST",
-      headers: { apikey: EVOLUTION_KEY, "Content-Type": "application/json" },
+      headers: { apikey: evolutionKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         url: webhookUrl,
         enabled: true,
@@ -95,16 +104,16 @@ export async function connectEvolutionWhatsApp(
 
     // 1. Check connection state first
     const stateRes = await fetch(
-      `${EVOLUTION_URL}/instance/connectionState/${instanceName}`,
-      { headers: { apikey: EVOLUTION_KEY } }
+      `${evolutionUrl}/instance/connectionState/${instanceName}`,
+      { headers: { apikey: evolutionKey } }
     ).catch(() => null);
 
     const stateJson = stateRes?.ok ? await stateRes.json().catch(() => ({})) : {};
     if (stateJson?.instance?.state === "open") return { connected: true };
 
     // 2. Instance exists but disconnected — get a fresh QR via /instance/connect
-    const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${instanceName}`, {
-      headers: { apikey: EVOLUTION_KEY },
+    const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
+      headers: { apikey: evolutionKey },
     }).catch(() => null);
 
     if (connectRes?.ok) {
@@ -116,9 +125,9 @@ export async function connectEvolutionWhatsApp(
     }
 
     // 3. Instance doesn't exist yet — create it
-    const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
+    const createRes = await fetch(`${evolutionUrl}/instance/create`, {
       method: "POST",
-      headers: { apikey: EVOLUTION_KEY, "Content-Type": "application/json" },
+      headers: { apikey: evolutionKey, "Content-Type": "application/json" },
       body: JSON.stringify({ instanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" }),
     }).catch(() => null);
 
@@ -141,6 +150,7 @@ export async function getEvolutionQR(tenantId: string): Promise<{ qr?: string; c
 export async function checkEvolutionConnection(tenantId: string): Promise<{ connected: boolean }> {
   try {
     const db = createServerClient();
+    const { url: evolutionUrl, key: evolutionKey } = getEvolutionConfig();
     const { data: tenant } = await db
       .from("tenants")
       .select("slug")
@@ -150,8 +160,8 @@ export async function checkEvolutionConnection(tenantId: string): Promise<{ conn
     if (!tenant?.slug) return { connected: false };
 
     const res = await fetch(
-      `${EVOLUTION_URL}/instance/connectionState/${tenant.slug}`,
-      { headers: { apikey: EVOLUTION_KEY }, cache: "no-store" }
+      `${evolutionUrl}/instance/connectionState/${tenant.slug}`,
+      { headers: { apikey: evolutionKey }, cache: "no-store" }
     ).catch(() => null);
 
     if (!res?.ok) return { connected: false };
