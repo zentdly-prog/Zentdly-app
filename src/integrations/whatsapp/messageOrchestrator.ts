@@ -2,7 +2,7 @@ import { createServerClient } from "@/infrastructure/supabase/server";
 import { WhatsAppSender } from "./sender";
 import { ConversationHandler } from "@/domain/conversation/conversationHandler";
 import { CustomerRepository } from "@/infrastructure/repositories/customerRepository";
-import { logAgentEvent, saveAgentState } from "@/domain/conversation/agentOps";
+import { isForgetCommand, logAgentEvent, resetConversationState, saveAgentState } from "@/domain/conversation/agentOps";
 import { handleDeterministicBookingMessage } from "@/domain/booking/deterministicRouter";
 import { renderFallbackReply } from "@/domain/conversation/fallbackResponder";
 import type { WhatsAppIncomingMessage } from "./types";
@@ -57,6 +57,28 @@ export async function handleIncomingMessage(
       .from("conversations")
       .update({ last_message_at: new Date().toISOString() })
       .eq("id", conversation.id);
+    return;
+  }
+
+  // "Olvidar" command — reset conversation state if operator allows it
+  const { data: wppConfig } = await db
+    .from("whatsapp_config")
+    .select("forget_command_enabled")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  const forgetAllowed = (wppConfig as { forget_command_enabled?: boolean | null } | null)?.forget_command_enabled ?? true;
+  if (forgetAllowed && isForgetCommand(msg.text)) {
+    await resetConversationState(db, conversation.id);
+    const replyText = "Listo, arrancamos de cero. ¿Querés reservar, ver disponibilidad o cancelar un turno?";
+    await sender.sendText(msg.from, replyText);
+    await conversationHandler.saveMessage(conversation.id, "outbound", replyText, { auto: true, reason: "forget_command" });
+    await logAgentEvent(db, {
+      tenantId,
+      conversationId: conversation.id,
+      customerId: customer.id,
+      eventType: "forget_command_handled",
+      payload: { provider: "meta", text: msg.text.slice(0, 200) },
+    });
     return;
   }
 

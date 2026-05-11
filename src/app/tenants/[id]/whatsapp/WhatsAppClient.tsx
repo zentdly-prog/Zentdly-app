@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useState, useTransition, useEffect, useRef } from "react";
-import { connectEvolutionWhatsApp, saveWhatsAppConfig, checkEvolutionConnection, toggleWhatsAppBot } from "@/lib/actions/whatsapp";
+import { connectEvolutionWhatsApp, saveWhatsAppConfig, checkEvolutionConnection, toggleWhatsAppBot, toggleForgetCommand } from "@/lib/actions/whatsapp";
 import { SubmitButton } from "@/components/SubmitButton";
 import { Alert } from "@/components/Alert";
 
@@ -10,6 +10,7 @@ type QrStatus = "idle" | "loading" | "qr" | "connected" | "error";
 type Config = {
   provider?: string;
   bot_enabled?: boolean | null;
+  forget_command_enabled?: boolean | null;
   meta_phone_number_id?: string | null;
   meta_access_token?: string | null;
   meta_verify_token?: string | null;
@@ -82,7 +83,9 @@ export default function WhatsAppClient({
   // Meta form state
   const [metaState, metaAction] = useActionState(saveWhatsAppConfig, null);
   const [botState, botAction] = useActionState(toggleWhatsAppBot, null);
+  const [forgetState, forgetAction] = useActionState(toggleForgetCommand, null);
   const botEnabled = botState?.enabled ?? initialConfig?.bot_enabled ?? true;
+  const forgetEnabled = forgetState?.enabled ?? initialConfig?.forget_command_enabled ?? true;
 
   const webhookUrl = `https://zentdly-app.vercel.app/api/webhooks/whatsapp`;
 
@@ -111,7 +114,7 @@ export default function WhatsAppClient({
         Elegí cómo conectar WhatsApp a este negocio.
       </p>
 
-      <form action={botAction} className={`mb-6 rounded-xl border p-4 ${botEnabled ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+      <form action={botAction} className={`mb-3 rounded-xl border p-4 ${botEnabled ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
         <input type="hidden" name="tenant_id" value={tenantId} />
         <input type="hidden" name="enabled" value={botEnabled ? "false" : "true"} />
         <div className="flex items-center justify-between gap-4">
@@ -135,6 +138,34 @@ export default function WhatsAppClient({
           </button>
         </div>
         {botState?.error && <p className="mt-2 text-xs text-red-600">{botState.error}</p>}
+      </form>
+
+      <form action={forgetAction} className="mb-6 rounded-xl border border-gray-200 bg-white p-4">
+        <input type="hidden" name="tenant_id" value={tenantId} />
+        <input type="hidden" name="enabled" value={forgetEnabled ? "false" : "true"} />
+        <label className="flex items-center justify-between gap-4 cursor-pointer">
+          <div>
+            <p className="text-sm font-semibold text-gray-900">Olvidar</p>
+            <p className="text-xs text-gray-500">
+              Permite que el cliente escriba &quot;olvidate&quot; o &quot;empezar de nuevo&quot; para reiniciar la conversación.
+            </p>
+          </div>
+          <button
+            type="submit"
+            role="switch"
+            aria-checked={forgetEnabled}
+            className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+              forgetEnabled ? "bg-green-600" : "bg-gray-300"
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                forgetEnabled ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </label>
+        {forgetState?.error && <p className="mt-2 text-xs text-red-600">{forgetState.error}</p>}
       </form>
 
       {/* Toggle */}

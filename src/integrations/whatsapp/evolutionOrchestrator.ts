@@ -1,7 +1,7 @@
 import { createServerClient } from "@/infrastructure/supabase/server";
 import { evolutionSendText } from "./evolutionSender";
 import { getBotPolicy } from "@/lib/actions/policies";
-import { logAgentEvent, saveAgentState } from "@/domain/conversation/agentOps";
+import { isForgetCommand, logAgentEvent, resetConversationState, saveAgentState } from "@/domain/conversation/agentOps";
 import { handleDeterministicBookingMessage } from "@/domain/booking/deterministicRouter";
 import { renderFallbackReply } from "@/domain/conversation/fallbackResponder";
 
@@ -21,7 +21,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   // ── 1. Find tenant ──────────────────────────────────────────────────────────
   const { data: config } = await db
     .from("whatsapp_config")
-    .select("tenant_id, connected")
+    .select("tenant_id, connected, forget_command_enabled")
     .eq("evolution_instance_name", msg.instanceName)
     .single();
 
@@ -148,6 +148,29 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
 
   const timezone = tenant?.timezone ?? "America/Argentina/Buenos_Aires";
   const policy = await getBotPolicy(tenantId);
+
+  // ── 5b. "Olvidar" command — reset conversation state if operator allows it ──
+  const forgetAllowed = (config as { forget_command_enabled?: boolean | null }).forget_command_enabled ?? true;
+  if (forgetAllowed && isForgetCommand(msg.text)) {
+    await resetConversationState(db, conversation.id);
+    const reply = "Listo, arrancamos de cero. ¿Querés reservar, ver disponibilidad o cancelar un turno?";
+    await evolutionSendText(msg.instanceName, msg.jid, reply);
+    await db.from("messages").insert({
+      conversation_id: conversation.id,
+      direction: "outbound",
+      content: reply,
+      raw_payload: { auto: true, reason: "forget_command" },
+    });
+    await db.from("conversations").update({ last_message_at: new Date().toISOString() }).eq("id", conversation.id);
+    await logAgentEvent(db, {
+      tenantId,
+      conversationId: conversation.id,
+      customerId: customer.id,
+      eventType: "forget_command_handled",
+      payload: { text: msg.text.slice(0, 200) },
+    });
+    return;
+  }
 
   if (msg.messageType === "audio") {
     await evolutionSendText(msg.instanceName, msg.jid, policy.audio_message);

@@ -14,6 +14,8 @@ export default async function WhatsAppPage({
     ? {
         provider: config.provider,
         bot_enabled: config.connected,
+        forget_command_enabled:
+          (config as { forget_command_enabled?: boolean | null }).forget_command_enabled ?? true,
         meta_phone_number_id: config.meta_phone_number_id,
         meta_access_token: config.meta_access_token,
         meta_verify_token: config.meta_verify_token,

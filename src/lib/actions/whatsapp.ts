@@ -64,6 +64,29 @@ export async function toggleWhatsAppBot(_prev: unknown, formData: FormData) {
   return { ok: true, enabled };
 }
 
+export async function toggleForgetCommand(_prev: unknown, formData: FormData) {
+  const tenantId = formData.get("tenant_id") as string;
+  const enabled = formData.get("enabled") === "true";
+
+  const parsed = z.string().uuid().safeParse(tenantId);
+  if (!parsed.success) return { error: "Tenant inválido." };
+
+  const db = createServerClient();
+  const { error } = await db
+    .from("whatsapp_config")
+    .update({ forget_command_enabled: enabled, updated_at: new Date().toISOString() })
+    .eq("tenant_id", tenantId);
+
+  if (error) {
+    if (error.code === "42703") {
+      return { error: "Falta correr la migración 010 (columna forget_command_enabled)." };
+    }
+    return { error: error.message };
+  }
+  revalidatePath(`/tenants/${tenantId}/whatsapp`);
+  return { ok: true, enabled };
+}
+
 function getEvolutionConfig() {
   const url = process.env.EVOLUTION_API_URL;
   const key = process.env.EVOLUTION_API_KEY;

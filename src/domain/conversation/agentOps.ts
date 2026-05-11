@@ -57,6 +57,40 @@ export interface AgentConversationState {
   updated_at: string;
 }
 
+const FORGET_PATTERNS: RegExp[] = [
+  /\bolvida(?:te|lo|r)?\b/,                  // olvida, olvidate, olvidalo, olvidar
+  /\bempec?z?(?:ar|amos|emos)?\s+(?:de\s+)?(?:nuevo|cero)\b/, // empezar de nuevo, empecemos de nuevo, empezamos de cero
+  /\bborra(?:r|lo|me)?\s+todo\b/,
+  /\bborra(?:r|lo|me)?\s+(?:lo\s+)?anterior\b/,
+  /\breinici(?:ar|amos|emos|alo)\b/,
+  /\bcancela\s+todo\b/,
+];
+
+export function isForgetCommand(message: string): boolean {
+  const normalized = message
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .trim();
+  return FORGET_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+export async function resetConversationState(
+  db: SupabaseClient,
+  conversationId: string,
+): Promise<void> {
+  const fresh = createEmptyAgentState();
+  await db.from("ai_sessions").upsert(
+    {
+      conversation_id: conversationId,
+      state: fresh,
+      missing_fields: [],
+      updated_at: fresh.updated_at,
+    },
+    { onConflict: "conversation_id" },
+  );
+}
+
 export function createEmptyAgentState(): AgentConversationState {
   const updatedAt = new Date().toISOString();
   return {
