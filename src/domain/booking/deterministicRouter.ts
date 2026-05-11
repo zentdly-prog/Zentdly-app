@@ -1605,9 +1605,12 @@ function parseDate(normalized: string, timezone: string, now: Date, priorDate: s
   if (day < 1 || day > 31) return null;
 
   const localNow = toZonedTime(now, timezone);
+  const todayStr = formatInTimeZone(now, timezone, "yyyy-MM-dd");
   const base = priorDate ? toZonedTime(new Date(`${priorDate}T12:00:00Z`), timezone) : localNow;
   const candidate = setDate(base, day);
-  const resolved = candidate < addDays(localNow, -1) ? addMonths(candidate, 1) : candidate;
+  const candidateStr = formatInTimeZone(candidate, timezone, "yyyy-MM-dd");
+  // If the candidate date is strictly before today, roll forward to next month.
+  const resolved = candidateStr < todayStr ? addMonths(candidate, 1) : candidate;
   return formatInTimeZone(resolved, timezone, "yyyy-MM-dd");
 }
 

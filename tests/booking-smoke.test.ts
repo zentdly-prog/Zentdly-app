@@ -30,7 +30,27 @@ async function main() {
   await smokeDocumentAsDepositProof();
   await smokePendingDoesNotBlockSlot();
   await smokeBareHourTreatedAmbiguous();
+  await smokeNoBookingInThePast();
   console.log("booking smoke tests passed");
+}
+
+async function smokeNoBookingInThePast() {
+  // Past-date booking attempt
+  const dbA = createSmokeDb();
+  const yesterday = formatInTimeZone(addDays(new Date(), -1), TIMEZONE, "yyyy-MM-dd");
+  const resA = await route(dbA, `Quiero reservar para ${yesterday} a las 14:00 a nombre de Santiago`);
+  assert.equal(resA.handled, true);
+  assert.match(resA.reply ?? "", /ya pas[oó]/i, JSON.stringify(resA));
+  assert.equal(dbA.reservations.length, 0, "no reservation should be created for past date");
+
+  // Past-time booking attempt for today (use a slot already in the past)
+  const dbB = createSmokeDb();
+  const today = formatInTimeZone(new Date(), TIMEZONE, "yyyy-MM-dd");
+  const oneMinuteAgo = formatInTimeZone(new Date(Date.now() - 90 * 60_000), TIMEZONE, "HH:mm");
+  const resB = await route(dbB, `Reservar para hoy a las ${oneMinuteAgo} a nombre de Santiago`);
+  assert.equal(resB.handled, true);
+  // Either past-time rejection OR ambiguity/availability error are acceptable, as long as no reservation is created
+  assert.equal(dbB.reservations.length, 0, `no reservation should be created for past time on ${today} ${oneMinuteAgo} — got ${JSON.stringify(resB)}`);
 }
 
 async function smokeBareHourTreatedAmbiguous() {

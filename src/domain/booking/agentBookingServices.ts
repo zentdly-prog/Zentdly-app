@@ -265,6 +265,12 @@ export class AgentAvailabilityService {
   }
 
   async assertSlotIsReservable(court: ReservableCourt, date: string, time: string): Promise<string | null> {
+    // No reservations in the past — neither past dates nor past times for today.
+    const slotStart = fromZonedTime(`${date}T${time}:00`, this.timezone);
+    if (slotStart.getTime() <= Date.now()) {
+      return `No puedo reservar para un horario que ya pasó (${date} a las ${time}). Pedime otra fecha y horario.`;
+    }
+
     if (this.getScheduleSlots(court, date).includes(time)) return null;
 
     const availability = await this.check(date, court.sport_name);
@@ -728,6 +734,12 @@ export class AgentReservationCommandService {
   ): Promise<{ ok: true; reservations: CustomerReservation[] } | { ok: false; reply: string; reservations?: CustomerReservation[] }> {
     const reservations = await this.findActiveByIds(reservationIds);
     if (!reservations.length) return { ok: false, reply: "No encontré reservas activas a tu nombre con esos datos." };
+
+    // Reject reschedules to a past datetime.
+    const targetStart = fromZonedTime(`${date}T${time}:00`, this.context.timezone);
+    if (targetStart.getTime() <= Date.now()) {
+      return { ok: false, reply: `No puedo mover la reserva a un horario que ya pasó (${date} a las ${time}). Pedime otra fecha y horario.`, reservations };
+    }
 
     const policy = await getBotPolicy(this.context.tenantId, this.context.db);
     for (const reservation of reservations) {
