@@ -965,6 +965,15 @@ function normalizedIntentToParsedMessage(
   let resolvedAmbiguous = normalized.time_ambiguous;
   const meridiemHint = detectMeridiem(rawNormalized);
 
+  // Defensive override: if the raw message contains a clear unambiguous time
+  // (HH:MM with HH ≥ 12, or "15 30" / "quince treinta" / "15 treinta" etc.),
+  // trust it over the LLM's ambiguity flag.
+  const explicitUnambiguous = parseUnambiguousTimeFromRaw(rawNormalized);
+  if (explicitUnambiguous && !multiTimes) {
+    resolvedTime = explicitUnambiguous;
+    resolvedAmbiguous = false;
+  }
+
   // Defensive override: the LLM sometimes returns a non-ambiguous HH:00 for input
   // like "a las 8" when the raw message has no AM/PM/morning/evening marker.
   // Force ambiguity back on so the bot asks for clarification.
@@ -1097,7 +1106,10 @@ export function parseBookingMessage(
   const normalized = normalizeText(message);
   const date = parseDate(normalized, timezone, now, state?.collected.date ?? null);
   const multiTimes = parseMultipleTimes(normalized);
-  const timeResolution = parseTime(normalized, state);
+  const unambiguousTime = parseUnambiguousTimeFromRaw(normalized);
+  const timeResolution = unambiguousTime
+    ? { time: unambiguousTime, ambiguous: false, options: null as { morning: string; evening: string } | null }
+    : parseTime(normalized, state);
   const time = multiTimes ? multiTimes[0] : timeResolution.time;
   const sport = parseSport(normalized);
   const customerName = parseCustomerName(message, state);
@@ -1612,6 +1624,87 @@ function parseDate(normalized: string, timezone: string, now: Date, priorDate: s
   // If the candidate date is strictly before today, roll forward to next month.
   const resolved = candidateStr < todayStr ? addMonths(candidate, 1) : candidate;
   return formatInTimeZone(resolved, timezone, "yyyy-MM-dd");
+}
+
+const SPANISH_HOUR_WORDS: Record<string, number> = {
+  cero: 0, una: 1, uno: 1, un: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6,
+  siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12, trece: 13, catorce: 14,
+  quince: 15, quinse: 15, dieciseis: 16, "dieciseís": 16, diecisiete: 17, dieciocho: 18,
+  diecinueve: 19, veinte: 20, veintiuna: 21, veintiuno: 21, veintidos: 22, veintitres: 23,
+};
+
+const SPANISH_MINUTE_WORDS: Record<string, number> = {
+  "y media": 30, treinta: 30, "y cuarto": 15, quince: 15, quinse: 15, cuarenta: 40,
+  "cuarenta y cinco": 45, cincuenta: 50, diez: 10, veinte: 20,
+};
+
+function parseUnambiguousTimeFromRaw(rawNormalized: string): string | null {
+  // Pattern 1: HH:MM with HH >= 12 (e.g. "15:30", "13:00", "20:30")
+  const hhmmMatch = rawNormalized.match(/\b(1[2-9]|2[0-3]):([0-5]\d)\b/);
+  if (hhmmMatch) return `${hhmmMatch[1]}:${hhmmMatch[2]}`;
+
+  // Pattern 2: HH MM with HH >= 12 (e.g. "15 30", "20 00") — space-separated
+  const hhSpaceMmMatch = rawNormalized.match(/\b(1[2-9]|2[0-3])\s+([0-5]\d)\b/);
+  if (hhSpaceMmMatch) return `${hhSpaceMmMatch[1]}:${hhSpaceMmMatch[2]}`;
+
+  // Pattern 2b: HH + Spanish minute word (e.g. "15 treinta", "20 y media", "18 cuarto")
+  const hhDigitMinWord = rawNormalized.match(/\b(1[2-9]|2[0-3])\s+(?:y\s+)?(media|cuarto|treinta|quince|quinse|cuarenta|cuarenta\s+y\s+cinco|cincuenta|veinte|diez)\b/);
+  if (hhDigitMinWord) {
+    const min = SPANISH_MINUTE_WORDS[hhDigitMinWord[2]] ??
+      (hhDigitMinWord[2] === "media" ? 30 : hhDigitMinWord[2] === "cuarto" ? 15 : 0);
+    return `${hhDigitMinWord[1]}:${min.toString().padStart(2, "0")}`;
+  }
+
+  // Pattern 3: HH alone with HH >= 13 (e.g. "20", "23") followed by hs/horas or end
+  const hhOnlyMatch = rawNormalized.match(/\b(1[3-9]|2[0-3])(?:\s*hs\b|\s*horas?\b|\s*$|\s*[,.])/);
+  if (hhOnlyMatch) return `${hhOnlyMatch[1]}:00`;
+
+  // Pattern 4: HH:MM with HH 1-11 BUT with AM/PM marker → unambiguous
+  const ampmMatch = rawNormalized.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|de\s+la\s+manana|de\s+la\s+tarde|de\s+la\s+noche)\b/);
+  if (ampmMatch) {
+    const h = Number(ampmMatch[1]);
+    const m = Number(ampmMatch[2] ?? 0);
+    const pm = /pm|tarde|noche/.test(ampmMatch[3]);
+    if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+      const hour = pm && h < 12 ? h + 12 : h;
+      return `${hour.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
+    }
+  }
+
+  // Pattern 5: Spanish numerals "quinse treinta", "diecisiete", "veintiuna y media",
+  // "ocho de la noche" (combined with meridiem to make unambiguous)
+  const spanishTime = parseSpanishTime(rawNormalized);
+  if (spanishTime) return spanishTime;
+
+  return null;
+}
+
+function parseSpanishTime(text: string): string | null {
+  // Look for "HOUR_WORD [y media | y cuarto | MINUTE_WORD]" or just HOUR_WORD with PM marker
+  const hourWordPattern = Object.keys(SPANISH_HOUR_WORDS).sort((a, b) => b.length - a.length).join("|");
+  // Match "veintidos y media" or "quinse treinta" or "diecisiete"
+  const match = text.match(new RegExp(`\\b(${hourWordPattern})(?:\\s+(?:y\\s+)?(media|cuarto|treinta|quince|quinse|cuarenta|cincuenta|diez|veinte))?\\b`));
+  if (!match) return null;
+  const hourWord = match[1];
+  const minWord = match[2];
+  const hour = SPANISH_HOUR_WORDS[hourWord];
+  if (hour === undefined) return null;
+  let minutes = 0;
+  if (minWord) {
+    if (minWord === "media") minutes = 30;
+    else if (minWord === "cuarto") minutes = 15;
+    else minutes = SPANISH_MINUTE_WORDS[minWord] ?? SPANISH_MINUTE_WORDS[`y ${minWord}`] ?? 0;
+  }
+
+  // Only return unambiguous: HH >= 12 OR explicit PM context in message
+  if (hour >= 12) return `${hour.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
+  if (/\b(pm|de\s+la\s+tarde|de\s+la\s+noche)\b/.test(text)) {
+    return `${(hour + 12).toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
+  }
+  if (/\b(am|de\s+la\s+manana)\b/.test(text)) {
+    return `${hour.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
+  }
+  return null; // ambiguous → leave for normal disambiguation
 }
 
 function isBareAmbiguousHour(time: string, rawNormalized: string): boolean {

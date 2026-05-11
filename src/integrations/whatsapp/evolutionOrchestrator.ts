@@ -154,6 +154,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   if (forgetAllowed && isForgetCommand(msg.text)) {
     await resetConversationState(db, conversation.id);
     const reply = "Listo, arrancamos de cero. ¿Querés reservar, ver disponibilidad o cancelar un turno?";
+    recordRecentOutbound(conversation.id, reply);
     await evolutionSendText(msg.instanceName, msg.jid, reply);
     await db.from("messages").insert({
       conversation_id: conversation.id,
@@ -173,6 +174,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   }
 
   if (msg.messageType === "audio") {
+    recordRecentOutbound(conversation.id, policy.audio_message);
     await evolutionSendText(msg.instanceName, msg.jid, policy.audio_message);
     await db.from("messages").insert({
       conversation_id: conversation.id,
@@ -207,6 +209,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
 
   if (deterministic.handled) {
     const reply = deterministic.reply ?? "No pude procesar tu consulta.";
+    recordRecentOutbound(conversation.id, reply);
     await evolutionSendText(msg.instanceName, msg.jid, reply);
     await db.from("messages").insert({
       conversation_id: conversation.id,
@@ -242,6 +245,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   });
 
   // ── 8. Send reply via Evolution ─────────────────────────────────────────────
+  recordRecentOutbound(conversation.id, reply);
   await evolutionSendText(msg.instanceName, msg.jid, reply);
 
   // ── 9. Save outbound message ────────────────────────────────────────────────
@@ -274,6 +278,24 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   );
 }
 
+// Recent outbound cache. Each conversation keeps its last few replies in memory,
+// so the echo guard catches loops even before the DB insert has settled.
+const recentOutboundCache = new Map<string, { content: string; ts: number }[]>();
+const RECENT_OUTBOUND_TTL_MS = 5 * 60_000;
+const RECENT_OUTBOUND_MAX = 5;
+
+export function recordRecentOutbound(conversationId: string, content: string): void {
+  const trimmed = content.trim();
+  if (!trimmed) return;
+  const now = Date.now();
+  const existing = (recentOutboundCache.get(conversationId) ?? []).filter(
+    (entry) => now - entry.ts < RECENT_OUTBOUND_TTL_MS,
+  );
+  existing.push({ content: trimmed, ts: now });
+  while (existing.length > RECENT_OUTBOUND_MAX) existing.shift();
+  recentOutboundCache.set(conversationId, existing);
+}
+
 async function isEchoOfOwnReply(
   db: ReturnType<typeof createServerClient>,
   conversationId: string,
@@ -282,7 +304,16 @@ async function isEchoOfOwnReply(
   const normalized = inboundText.trim();
   if (normalized.length < 20) return false; // too short to be a reliable match
 
-  const since = new Date(Date.now() - 5 * 60_000).toISOString();
+  // In-memory cache first — catches the case where the outbound DB insert
+  // hasn't completed by the time the echo arrives.
+  const now = Date.now();
+  const cached = (recentOutboundCache.get(conversationId) ?? []).filter(
+    (entry) => now - entry.ts < RECENT_OUTBOUND_TTL_MS,
+  );
+  if (cached.some((entry) => entry.content === normalized)) return true;
+  recentOutboundCache.set(conversationId, cached);
+
+  const since = new Date(now - RECENT_OUTBOUND_TTL_MS).toISOString();
   const { data: lastOutbound } = await db
     .from("messages")
     .select("content")
@@ -290,7 +321,7 @@ async function isEchoOfOwnReply(
     .eq("direction", "outbound")
     .gte("created_at", since)
     .order("created_at", { ascending: false })
-    .limit(3);
+    .limit(5);
 
   if (!lastOutbound?.length) return false;
   return lastOutbound.some((m) => (m.content as string).trim() === normalized);
