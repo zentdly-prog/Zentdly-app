@@ -26,7 +26,35 @@ async function main() {
   await smokeBareNameCompletesBooking();
   await smokeMultiTimeBookingInOneMessage();
   await smokePendingReschedulesToNewSlot();
+  await smokeQuantityNotMisreadAsTime();
+  await smokeDocumentAsDepositProof();
   console.log("booking smoke tests passed");
+}
+
+async function smokeQuantityNotMisreadAsTime() {
+  // Bug: "2 canchas para las 10" was being parsed as multi-time [02:00, 10:00]
+  const db = createSmokeDb();
+  const date = futureDate(9);
+  const result = await route(db, `Quiero reservar 2 canchas para ${date} a las 14:00 a nombre de Santiago`);
+  assert.equal(result.handled, true, JSON.stringify(result));
+  // Bot must NOT have tried to book at 02:00 — only at 14:00 with quantity 2
+  assert.doesNotMatch(result.reply ?? "", /02:00/);
+  assert.match(result.reply ?? "", /14:00/);
+  const pending = db.reservations.filter((r) => r.status === "pending");
+  assert.equal(pending.length, 2, `expected 2 pending, got ${pending.length}: ${JSON.stringify(pending)}`);
+}
+
+async function smokeDocumentAsDepositProof() {
+  // A [document] message after the deposit prompt should confirm the pending
+  const db = createSmokeDb();
+  const date = futureDate(10);
+  const initial = await route(db, `Reservar 1 cancha para ${date} a las 15:00 a nombre de Mora`);
+  assert.match(initial.reply ?? "", /Reserva pendiente/i);
+  assert.equal(db.reservations.filter((r) => r.status === "pending").length, 1);
+
+  const proof = await route(db, "[document]");
+  assert.match(proof.reply ?? "", /Reserva confirmada con seña/i, JSON.stringify(proof));
+  assert.equal(db.reservations.filter((r) => r.status === "confirmed").length, 1);
 }
 
 async function smokePendingReschedulesToNewSlot() {

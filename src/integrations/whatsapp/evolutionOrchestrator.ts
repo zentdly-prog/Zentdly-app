@@ -12,7 +12,7 @@ export interface EvolutionIncomingMessage {
   text: string;
   messageId: string;
   pushName?: string;
-  messageType?: "text" | "audio" | "image" | "unknown";
+  messageType?: "text" | "audio" | "image" | "document" | "sticker" | "video" | "unknown";
 }
 
 export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Promise<void> {

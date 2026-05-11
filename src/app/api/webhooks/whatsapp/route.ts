@@ -100,16 +100,29 @@ function parseEvolutionPayload(payload: Record<string, unknown>): EvolutionIncom
     const messageType =
       message?.audioMessage ? "audio" :
       message?.imageMessage ? "image" :
+      message?.documentMessage ? "document" :
+      message?.documentWithCaptionMessage ? "document" :
+      message?.stickerMessage ? "sticker" :
+      message?.videoMessage ? "video" :
       text?.trim() ? "text" :
       "unknown";
 
-    if (!text?.trim() && !["audio", "image"].includes(messageType)) return null;
+    const mediaTypes = ["audio", "image", "document", "sticker", "video"];
+    if (!text?.trim() && !mediaTypes.includes(messageType)) return null;
+
+    const placeholderText =
+      text?.trim() ||
+      (messageType === "image" ? "[image]" :
+       messageType === "document" ? "[document]" :
+       messageType === "sticker" ? "[sticker]" :
+       messageType === "video" ? "[video]" :
+       "[audio]");
 
     return {
       instanceName: payload.instance as string,
       from,
       jid,
-      text: text?.trim() || (messageType === "image" ? "[image]" : "[audio]"),
+      text: placeholderText,
       messageId: key?.id as string,
       pushName: data?.pushName as string | undefined,
       messageType,

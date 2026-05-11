@@ -997,7 +997,15 @@ function normalizedIntentToParsedMessage(
     courtQuantity: normalized.quantity,
     asksUnsupportedSport: Boolean(normalized.sport && normalizeText(normalized.sport).includes("futbol")),
     hasCorrection: normalized.intent === "reschedule" || normalized.action_requested === "reschedule_reservation",
-    hasDepositProof: normalized.intent === "deposit_confirmation" || normalized.action_requested === "confirm_pending_reservation",
+    hasDepositProof:
+      normalized.intent === "deposit_confirmation" ||
+      normalized.action_requested === "confirm_pending_reservation" ||
+      /^\[(?:image|document|video)\]$/.test(rawMessage.trim()) ||
+      ((state.intent === "booking" &&
+        state.status === "collecting_data" &&
+        (state.missing?.includes("deposit") ||
+          (state.pending_deposit_reservation_ids?.length ?? 0) > 0)) &&
+        /^\[(?:image|document|video|sticker)\]$/.test(rawMessage.trim())),
     timeAmbiguous: resolvedAmbiguous && !multiTimes,
     timeOptions,
     contextualReference: normalized.contextual_reference,
@@ -1061,7 +1069,16 @@ export function parseBookingMessage(
   const courtQuantity = parseCourtQuantity(normalized);
   const asksUnsupportedSport = /\bfutbol\b|\bfutbol\s*7\b|\bf7\b|\bfutbol\s*5\b/.test(normalized);
   const hasCorrection = /\b(no+no+|queria|quise|me equivoque|era para)\b/.test(normalized);
-  const hasDepositProof = /\b(comprobante|transferi|transferencia|pague|pagado|mande|envie|seña enviada|sena enviada)\b/.test(normalized) || normalized === "[image]";
+  const isMediaPlaceholder = /^\[(?:image|document|video)\]$/.test(normalized);
+  const awaitingDeposit =
+    state?.intent === "booking" &&
+    state.status === "collecting_data" &&
+    (state.missing?.includes("deposit") ||
+      (state.pending_deposit_reservation_ids?.length ?? 0) > 0);
+  const hasDepositProof =
+    /\b(comprobante|transferi|transferencia|pague|pagado|mande|envie|seña enviada|sena enviada)\b/.test(normalized) ||
+    isMediaPlaceholder ||
+    (awaitingDeposit && /^\[(?:image|document|video|sticker)\]$/.test(normalized));
   const wantsReserve = /\b(reserv\w*|agend\w*|anot\w*|sacar|hacer una reserva)\b/.test(normalized);
   const wantsCancel = /\b(cancel\w*|anula\w*|baja|dar de baja)\b/.test(normalized);
   const wantsReschedule = /\b(reprogram\w*|cambi\w*|mover|moveme|pasar|pasame)\b/.test(normalized);
@@ -1567,11 +1584,12 @@ function detectMeridiem(normalized: string): "morning" | "evening" | null {
 }
 
 function parseMultipleTimes(normalized: string): string[] | null {
-  // Looks for patterns like "una a las 14, otra a las 16, ... y la ultima a las 21"
-  // or simply "14, 16, 18 y 21" when in a list context (with "y" + numbers separated by commas)
+  // Only trigger on UNAMBIGUOUS multi-time signals. Pure comma lists like
+  // "2 canchas para las 10, a nombre de X" must NOT match — the leading
+  // "2" is a quantity, not a time.
   const cleaned = normalized.replace(/\s+/g, " ").trim();
 
-  // Variant 1: explicit "una/otra a las X" chain
+  // Variant 1: explicit "una/otra a las X" chain (the canonical user pattern).
   const enumeratedMatches = [...cleaned.matchAll(
     /\b(?:una|otra|la\s+(?:ultima|primera|segunda|tercera|cuarta))\s+a\s+(?:las\s+)?(\d{1,2})(?::(\d{2}))?\s*(?:hs|horas?)?/g,
   )];
@@ -1581,22 +1599,25 @@ function parseMultipleTimes(normalized: string): string[] | null {
     return dedupeTimes(times);
   }
 
-  // Variant 2: explicit comma-separated time list with at least 2 commas or "y"
-  const inListContext = /\b(?:para\s+)?(?:las\s+)?(\d{1,2})(?::\d{2})?\s*(?:hs|horas?)?\s*[,;]/.test(cleaned);
-  if (inListContext) {
-    const allTimes = [...cleaned.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(?:hs|horas?)?\b/g)];
-    if (allTimes.length >= 2) {
-      const candidates = allTimes
-        .filter((m) => {
-          const hour = Number(m[1]);
-          return hour >= 0 && hour <= 23;
-        })
-        .map((m) => formatHourMinute(m[1], m[2]));
-      const dedup = dedupeTimes(candidates);
-      if (dedup.length >= 2) return dedup;
-    }
+  // Variant 2: pure time-list with "y" connector (e.g. "a las 14, 16, 18 y 21").
+  // Requirements: at least 3 candidate times AND a "y" connector before the last one,
+  // AND no candidate is immediately followed by a quantity word like "canchas/jugadores".
+  const hasYConnector = /\by\s+(?:las\s+|a\s+las\s+)?\d{1,2}\b/.test(cleaned);
+  if (!hasYConnector) return null;
+
+  const quantityWord = /^(?:cancha|canchas|jugador(?:es)?|persona(?:s)?|reserva(?:s)?|turno(?:s)?)\b/;
+  const candidates: string[] = [];
+  for (const match of cleaned.matchAll(/\b(\d{1,2})(?::(\d{2}))?\b/g)) {
+    const hour = Number(match[1]);
+    if (hour < 0 || hour > 23) continue;
+    // Exclude when followed by quantity word: "2 canchas", "4 jugadores"
+    const after = cleaned.slice(match.index! + match[0].length).trimStart();
+    if (quantityWord.test(after)) continue;
+    candidates.push(formatHourMinute(match[1], match[2]));
   }
 
+  const dedup = dedupeTimes(candidates);
+  if (dedup.length >= 3) return dedup;
   return null;
 }
 
