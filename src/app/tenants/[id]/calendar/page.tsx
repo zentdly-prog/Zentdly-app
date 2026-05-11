@@ -87,6 +87,21 @@ export default async function CalendarPage({
           )}
         </div>
       </div>
+      <div className="mb-4 flex flex-wrap gap-3 text-xs">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-3 w-3 rounded bg-green-200 border border-green-300" />
+          <span className="text-gray-600">Confirmada</span>
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-3 w-3 rounded bg-yellow-200 border border-yellow-300" />
+          <span className="text-gray-600">Pendiente</span>
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-3 w-3 rounded bg-red-200 border border-red-300" />
+          <span className="text-gray-600">Cancelada</span>
+        </span>
+      </div>
+
       <div className="space-y-4">
         {courts.map((court) => {
           const units = getActiveCourtUnits(court);
@@ -115,9 +130,16 @@ export default async function CalendarPage({
                         <div className="space-y-2">
                           {unitReservations.map((reservation) => {
                             const customer = one(reservation.customers as Relation<{ name: string | null; phone_e164: string | null }>);
+                            const styles = statusStyles(reservation.status);
                             return (
-                              <div key={reservation.id} className="rounded-md bg-green-100 px-2 py-1 text-xs text-green-800">
-                                {formatInTimeZone(new Date(reservation.starts_at), tz, "HH:mm")} · {customer?.name || customer?.phone_e164 || "Cliente"}
+                              <div
+                                key={reservation.id}
+                                className={`rounded-md px-2 py-1 text-xs ${styles.container}`}
+                                title={statusLabel(reservation.status)}
+                              >
+                                <span className={styles.text}>
+                                  {formatInTimeZone(new Date(reservation.starts_at), tz, "HH:mm")} · {customer?.name || customer?.phone_e164 || "Cliente"}
+                                </span>
                               </div>
                             );
                           })}
@@ -137,4 +159,28 @@ export default async function CalendarPage({
 
 function isDateParam(value: string | undefined): value is string {
   return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+}
+
+function statusStyles(status: string): { container: string; text: string } {
+  switch (status) {
+    case "pending":
+      return { container: "bg-yellow-100 border border-yellow-200", text: "text-yellow-900" };
+    case "cancelled":
+      return { container: "bg-red-100 border border-red-200", text: "text-red-900 line-through" };
+    case "completed":
+      return { container: "bg-blue-100 border border-blue-200", text: "text-blue-900" };
+    case "confirmed":
+    default:
+      return { container: "bg-green-100 border border-green-200", text: "text-green-900" };
+  }
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case "pending": return "Pendiente (esperando seña)";
+    case "cancelled": return "Cancelada";
+    case "completed": return "Completada";
+    case "confirmed": return "Confirmada";
+    default: return status;
+  }
 }
