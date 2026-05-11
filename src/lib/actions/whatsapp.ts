@@ -78,8 +78,12 @@ export async function toggleForgetCommand(_prev: unknown, formData: FormData) {
     .eq("tenant_id", tenantId);
 
   if (error) {
-    if (error.code === "42703") {
-      return { error: "Falta correr la migración 010 (columna forget_command_enabled)." };
+    const missingColumn =
+      error.code === "42703" ||
+      error.code === "PGRST204" ||
+      /forget_command_enabled/.test(error.message ?? "");
+    if (missingColumn) {
+      return { error: "Falta correr la migración 010 en Supabase Studio (columna forget_command_enabled)." };
     }
     return { error: error.message };
   }
