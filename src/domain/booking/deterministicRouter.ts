@@ -902,8 +902,10 @@ async function normalizeMessage(
     await logRouterEvent(input, "intent_normalized", { normalized });
     return normalized;
   } catch (error) {
+    const err = error as Error & { rawPayload?: unknown };
     await logRouterEvent(input, "intent_normalization_failed", {
-      error: error instanceof Error ? error.message : "Unknown extractor error",
+      error: err.message ?? "Unknown extractor error",
+      rawPayload: err.rawPayload ?? null,
     });
     return null;
   }

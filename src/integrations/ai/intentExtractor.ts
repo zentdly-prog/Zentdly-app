@@ -125,8 +125,14 @@ export class IntentExtractor {
     });
 
     const raw = safeJsonParse(response.choices[0]?.message?.content);
-    const parsed = NormalizedIntentSchema.parse(raw);
-    return normalizeMissingFields(parsed);
+    try {
+      const parsed = NormalizedIntentSchema.parse(raw);
+      return normalizeMissingFields(parsed);
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error("schema parse failed");
+      (err as Error & { rawPayload?: unknown }).rawPayload = raw;
+      throw err;
+    }
   }
 
   async extract(
