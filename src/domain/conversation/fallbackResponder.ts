@@ -32,7 +32,17 @@ export async function renderFallbackReply(input: FallbackInput): Promise<string>
   let reply: string;
   let category: string;
 
-  if (inOperationalFlow) {
+  // Info queries (price, hours, sports, address, policy) take priority even mid-flow,
+  // and may contain multiple sub-questions — answer them all.
+  const policyQuestions = detectPolicyQuestions(input.message);
+  if (normalized?.intent === "policy_question" || policyQuestions.length > 0) {
+    category = "policy_question";
+    reply = await answerPolicyQuestions(input, policy, policyQuestions.length ? policyQuestions : [input.message]);
+    if (inOperationalFlow) {
+      const followUp = buildFlowRedirectReply(state);
+      if (followUp) reply = `${reply}\n\n${followUp}`;
+    }
+  } else if (inOperationalFlow) {
     category = "in_flow_redirect";
     reply = buildFlowRedirectReply(state);
   } else if (normalized?.intent === "greeting") {
@@ -44,9 +54,6 @@ export async function renderFallbackReply(input: FallbackInput): Promise<string>
     await saveAgentState(input.db, input.conversationId, {
       status: "handoff",
     });
-  } else if (normalized?.intent === "policy_question") {
-    category = "policy_question";
-    reply = await renderPolicyAnswer(input, policy, normalized.notes ?? input.message);
   } else if (looksLikeOperationalIntent(input.message)) {
     category = "operational_redirect";
     reply = "Para ayudarte mejor, decime día, horario y a nombre de quién hago la reserva.";
@@ -91,52 +98,87 @@ function buildFlowRedirectReply(state: AgentConversationState): string {
   return "Decime el dato que falta y avanzamos.";
 }
 
-async function renderPolicyAnswer(
+type PolicyTopic = "price" | "hours" | "sports" | "address" | "cancellation" | "deposit";
+
+function detectPolicyQuestions(message: string): PolicyTopic[] {
+  const normalized = normalizeText(message);
+  const found: PolicyTopic[] = [];
+  if (/\b(precio|cuanto\s+sale|cuanto\s+cuesta|cuanto\s+cuasta|cuanto\s+es\s+la\s+cancha|tarifa|valor|sale|cuesta)\b/.test(normalized)) found.push("price");
+  if (/\b(sena|senia|sen[~]?a|deposito|adelanto)\b/.test(normalized)) found.push("deposit");
+  if (/\b(horario|abren|cierran|hasta\s+que\s+hora|desde\s+que\s+hora|que\s+hora\s+abren)\b/.test(normalized)) found.push("hours");
+  if (/\b(deporte|deportes|que\s+cancha|canchas\s+tienen|que\s+canchas)\b/.test(normalized)) found.push("sports");
+  if (/\b(direccion|donde\s+estan|donde\s+quedan|ubicacion|donde\s+es)\b/.test(normalized)) found.push("address");
+  if (/\b(cancelar|cancelacion|anular|hasta\s+cuando\s+cancelo)\b/.test(normalized) && !/\bcancela\w*\s+mi\b/.test(normalized)) {
+    found.push("cancellation");
+  }
+  return found;
+}
+
+async function answerPolicyQuestions(
   input: FallbackInput,
   policy: Awaited<ReturnType<typeof getBotPolicy>>,
-  hint: string,
+  topicsOrMessages: PolicyTopic[] | string[],
 ): Promise<string> {
-  const normalized = normalizeText(hint);
+  const topics: PolicyTopic[] = typeof topicsOrMessages[0] === "string"
+    ? detectPolicyQuestions(topicsOrMessages[0] as string)
+    : (topicsOrMessages as PolicyTopic[]);
 
-  if (/\b(precio|cuanto sale|cuanto cuesta|tarifa|valor)\b/.test(normalized)) {
-    const courts = await fetchCourtPrices(input.db, input.tenantId);
-    if (!courts.length) return "Por ahora no tengo precios cargados, te confirmo en cuanto pueda.";
-    const lines = courts.map((c) =>
-      c.price != null ? `• ${c.sport_name}: $${c.price}` : `• ${c.sport_name}: precio a consultar`,
-    );
-    return `Precios por turno:\n${lines.join("\n")}`;
+  if (!topics.length) return "Decime concretamente qué querés saber y te ayudo.";
+
+  const sections: string[] = [];
+  for (const topic of topics) {
+    const section = await renderPolicyTopic(input, policy, topic);
+    if (section) sections.push(section);
   }
+  return sections.join("\n\n");
+}
 
-  if (/\b(horario|abren|cierran|hasta que hora|desde que hora)\b/.test(normalized)) {
-    const courts = await fetchCourtHours(input.db, input.tenantId);
-    if (!courts.length) return "Aún no tengo horarios cargados, te confirmo en cuanto pueda.";
-    const lines = courts.map(
-      (c) => `• ${c.sport_name}: ${c.open_time.slice(0, 5)} a ${c.close_time.slice(0, 5)}`,
-    );
-    return `Horarios:\n${lines.join("\n")}`;
+async function renderPolicyTopic(
+  input: FallbackInput,
+  policy: Awaited<ReturnType<typeof getBotPolicy>>,
+  topic: PolicyTopic,
+): Promise<string> {
+  switch (topic) {
+    case "price": {
+      const courts = await fetchCourtPrices(input.db, input.tenantId);
+      if (!courts.length) return "Por ahora no tengo precios cargados, te confirmo en cuanto pueda.";
+      const lines = courts.map((c) =>
+        c.price != null ? `• ${c.sport_name}: $${c.price}` : `• ${c.sport_name}: precio a consultar`,
+      );
+      return `Precios por turno:\n${lines.join("\n")}`;
+    }
+    case "deposit": {
+      if (!policy.requires_deposit) return "Por ahora no pedimos seña para reservar.";
+      if (policy.deposit_amount != null) return `La seña para reservar es de $${policy.deposit_amount}.`;
+      if (policy.deposit_percentage != null) return `La seña para reservar es del ${policy.deposit_percentage}% del turno.`;
+      return "Para reservar se requiere seña; el monto te lo confirmamos en el momento.";
+    }
+    case "hours": {
+      const courts = await fetchCourtHours(input.db, input.tenantId);
+      if (!courts.length) return "Aún no tengo horarios cargados, te confirmo en cuanto pueda.";
+      const lines = courts.map(
+        (c) => `• ${c.sport_name}: ${c.open_time.slice(0, 5)} a ${c.close_time.slice(0, 5)}`,
+      );
+      return `Horarios:\n${lines.join("\n")}`;
+    }
+    case "sports": {
+      const courts = await fetchCourtSports(input.db, input.tenantId);
+      if (!courts.length) return "Aún no tengo deportes configurados.";
+      return `Tenemos canchas de: ${courts.map((c) => c.sport_name).join(", ")}.`;
+    }
+    case "address": {
+      const tenant = await fetchTenant(input.db, input.tenantId);
+      return tenant?.address?.trim()
+        ? `Estamos en ${tenant.address}.`
+        : "Te paso la dirección en breve.";
+    }
+    case "cancellation": {
+      const hours = policy.cancellation_min_hours ?? 0;
+      return hours > 0
+        ? `Podés cancelar hasta ${hours} hs antes del turno.`
+        : "Podés cancelar la reserva en cualquier momento.";
+    }
   }
-
-  if (/\b(deporte|deportes|que cancha|canchas tienen)\b/.test(normalized)) {
-    const courts = await fetchCourtSports(input.db, input.tenantId);
-    if (!courts.length) return "Aún no tengo deportes configurados.";
-    return `Tenemos canchas de: ${courts.map((c) => c.sport_name).join(", ")}.`;
-  }
-
-  if (/\b(direccion|donde estan|donde quedan|ubicacion|donde es)\b/.test(normalized)) {
-    const tenant = await fetchTenant(input.db, input.tenantId);
-    return tenant?.address?.trim()
-      ? `Estamos en ${tenant.address}.`
-      : "Te paso la dirección en breve.";
-  }
-
-  if (/\b(cancelar|cancelacion|anular)\b/.test(normalized)) {
-    const hours = policy.cancellation_min_hours ?? 0;
-    return hours > 0
-      ? `Podés cancelar hasta ${hours} hs antes del turno. Si necesitás, mandame el día y horario para cancelarla.`
-      : "Podés cancelar la reserva en cualquier momento. Mandame el día y horario para cancelarla.";
-  }
-
-  return "Decime concretamente qué querés saber y te ayudo.";
 }
 
 async function fetchTenant(db: SupabaseClient, tenantId: string) {

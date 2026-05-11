@@ -25,7 +25,37 @@ async function main() {
   await smokeSecondBookingDoesNotInheritFirst();
   await smokeBareNameCompletesBooking();
   await smokeMultiTimeBookingInOneMessage();
+  await smokePendingReschedulesToNewSlot();
   console.log("booking smoke tests passed");
+}
+
+async function smokePendingReschedulesToNewSlot() {
+  // Bug: after a pending is created, if user re-confirms a NEW time,
+  // the pending should be rescheduled (not keep the old reservation
+  // while pretending to be at the new time).
+  const db = createSmokeDb();
+  const date = futureDate(3);
+
+  // Initial: create pending at 14:00 (unambiguous)
+  const initial = await route(db, `Quiero reservar 1 cancha para ${date} a las 14:00 a nombre de Mora`);
+  assert.match(initial.reply ?? "", /Reserva pendiente/i, JSON.stringify(initial));
+  assert.equal(db.reservations.length, 1);
+  const reservationId = db.reservations[0].id as string;
+
+  // User asks for a different slot WITHOUT a booking verb — should still
+  // reschedule the existing pending (this was the user's real-world bug).
+  const change = await route(db, `a las 16:00`);
+  assert.equal(change.handled, true, JSON.stringify(change));
+  assert.match(change.reply ?? "", /16:00/);
+  // Still only ONE reservation (rescheduled, not duplicated)
+  assert.equal(db.reservations.length, 1);
+  assert.equal(db.reservations[0].id, reservationId);
+  // It is now at 16:00, not 14:00
+  assert.equal(
+    formatInTimeZone(new Date(String(db.reservations[0].starts_at)), TIMEZONE, "HH:mm"),
+    "16:00",
+    "pending must be at 16:00 after the change, not still at 14:00",
+  );
 }
 
 async function smokeMultiTimeBookingInOneMessage() {

@@ -60,12 +60,9 @@ export async function handleDeterministicBookingMessage(
 ): Promise<DeterministicRouterResult> {
   const rawState = await getAgentState(input.db, input.conversationId);
   const normalizedIntent = await normalizeMessage(input, rawState);
-  const policyQuestion = parsePolicyQuestion(input.message);
-  if (policyQuestion === "deposit") {
-    const reply = await renderDepositReply(input.tenantId, input.db);
-    await logRouterEvent(input, "deposit_answered", { reply, normalizedIntent });
-    return { handled: true, reply };
-  }
+  // Policy questions (including deposit-only) now route through the fallback
+  // responder so multi-topic queries like "cuanto cuesta y cuanto es la seña"
+  // get a complete answer.
 
   const parsed = normalizedIntent
     ? normalizedIntentToParsedMessage(normalizedIntent, rawState, input.message)
@@ -159,6 +156,7 @@ export async function handleDeterministicBookingMessage(
       customerName,
       courtQuantity,
       missing: ["time"],
+      lastOfferedSlots: [parsed.timeOptions.morning, parsed.timeOptions.evening],
     });
     return {
       handled: true,
@@ -653,6 +651,44 @@ export async function handleDeterministicBookingMessage(
 
     if (policy.requires_deposit && !parsed.hasDepositProof && pendingReservationIds.length > 0) {
       const depositLine = await renderDepositLine(input.tenantId, input.db);
+      const pendingMatch = pendingReservationMatchesSlot(state, date, slotResolution.time);
+
+      // If the existing pending is at a DIFFERENT slot, reschedule it to the new one
+      // so the pending IDs keep pointing to the right reservation.
+      if (!pendingMatch) {
+        const reschedule = await booking.reservations.rescheduleMany(
+          pendingReservationIds,
+          date,
+          slotResolution.time,
+        );
+        if (!reschedule.ok) {
+          await persistState(input, state, parsed, {
+            intent: "booking",
+            status: "collecting_data",
+            sport,
+            date,
+            time: slotResolution.time,
+            customerName,
+            courtQuantity,
+            missing: ["deposit"],
+            pendingReservationIds,
+            pendingDepositReservationIds: pendingReservationIds,
+          });
+          await logRouterEvent(input, "pending_reschedule_failed", {
+            reservationIds: pendingReservationIds,
+            date,
+            time: slotResolution.time,
+            reply: reschedule.reply,
+          });
+          return { handled: true, reply: reschedule.reply };
+        }
+        await logRouterEvent(input, "pending_rescheduled_to_new_slot", {
+          reservationIds: pendingReservationIds,
+          date,
+          time: slotResolution.time,
+        });
+      }
+
       await persistState(input, state, parsed, {
         intent: "booking",
         status: "collecting_data",
@@ -664,6 +700,13 @@ export async function handleDeterministicBookingMessage(
         missing: ["deposit"],
         pendingReservationIds,
         pendingDepositReservationIds: pendingReservationIds,
+        candidateReservationIds: pendingReservationIds,
+        candidateReservations: reservationRefsFromIds(pendingReservationIds, {
+          sport,
+          date,
+          time: slotResolution.time,
+          status: "pending",
+        }),
         pendingConfirmation: buildPendingConfirmation("confirm_deposit", pendingReservationIds, {
           date,
           time: slotResolution.time,
@@ -671,9 +714,10 @@ export async function handleDeterministicBookingMessage(
           courtQuantity,
         }),
       });
+      const verb = pendingMatch ? "ya quedó pendiente" : "quedó actualizada y pendiente";
       return {
         handled: true,
-        reply: `La reserva ya quedó pendiente para ${date} a las ${slotResolution.time} a nombre de ${customerName}.\n${depositLine || "Para confirmarla hace falta seña."}\nMandame el comprobante y la marco como confirmada.`,
+        reply: `La reserva ${verb} para ${date} a las ${slotResolution.time} a nombre de ${customerName}.\n${depositLine || "Para confirmarla hace falta seña."}\nMandame el comprobante y la marco como confirmada.`,
       };
     }
 
@@ -843,15 +887,6 @@ function maybeResetStateForNewOperation(
   };
 }
 
-function parsePolicyQuestion(message: string): "deposit" | null {
-  const normalized = normalizeText(message);
-  const mentionsDeposit = /\b(sena|deposito|senia|seña)\b/.test(normalized);
-  if (!mentionsDeposit) return null;
-
-  const asksQuestion = /\b(cuanto|cuanta|cual|hay|piden|pedis|requiere|tengo|tiene|sale|valor|monto|transfer)\b/.test(normalized) || normalized.includes("?");
-  return asksQuestion ? "deposit" : null;
-}
-
 async function normalizeMessage(
   input: DeterministicRouterInput,
   state: AgentConversationState,
@@ -906,9 +941,37 @@ function normalizedIntentToParsedMessage(
     normalized.confirmation.is_confirmation && state.intent !== "unknown" ? state.intent :
     "unknown";
 
-  const multiTimes = fallbackIntent === "booking" ? parseMultipleTimes(normalizeText(rawMessage)) : null;
+  const rawNormalized = normalizeText(rawMessage);
+  const multiTimes = fallbackIntent === "booking" ? parseMultipleTimes(rawNormalized) : null;
 
-  const timeOptions = normalized.time_ambiguous && !multiTimes
+  // Resolve LLM-flagged ambiguity using explicit markers or prior offered slots
+  let resolvedTime = normalized.time;
+  let resolvedAmbiguous = normalized.time_ambiguous;
+  if (normalized.time_ambiguous && normalized.time_options.length >= 2 && !multiTimes) {
+    const morning = normalized.time_options[0];
+    const evening = normalized.time_options[1];
+    const meridiemHint = detectMeridiem(rawNormalized);
+    if (meridiemHint === "morning") {
+      resolvedTime = morning;
+      resolvedAmbiguous = false;
+    } else if (meridiemHint === "evening") {
+      resolvedTime = evening;
+      resolvedAmbiguous = false;
+    } else if (state.last_offered_slots?.length === 2) {
+      const offered = state.last_offered_slots;
+      const bare = rawNormalized.match(/^\s*(\d{1,2})(?::(\d{2}))?\s*$/);
+      if (bare) {
+        const padded = `${bare[1].padStart(2, "0")}:${(bare[2] ?? "00").padStart(2, "0")}`;
+        const match = offered.find((slot) => slot === padded);
+        if (match) {
+          resolvedTime = match;
+          resolvedAmbiguous = false;
+        }
+      }
+    }
+  }
+
+  const timeOptions = resolvedAmbiguous && !multiTimes
     ? {
         morning: normalized.time_options[0] ?? "08:00",
         evening: normalized.time_options[1] ?? "20:00",
@@ -923,7 +986,7 @@ function normalizedIntentToParsedMessage(
   return {
     intent: fallbackIntent,
     date: normalized.date,
-    time: multiTimes ? multiTimes[0] : normalized.time,
+    time: multiTimes ? multiTimes[0] : resolvedTime,
     multiTimes,
     sport: normalized.sport,
     customerName: normalized.customer_name,
@@ -932,22 +995,13 @@ function normalizedIntentToParsedMessage(
     asksUnsupportedSport: Boolean(normalized.sport && normalizeText(normalized.sport).includes("futbol")),
     hasCorrection: normalized.intent === "reschedule" || normalized.action_requested === "reschedule_reservation",
     hasDepositProof: normalized.intent === "deposit_confirmation" || normalized.action_requested === "confirm_pending_reservation",
-    timeAmbiguous: normalized.time_ambiguous,
+    timeAmbiguous: resolvedAmbiguous && !multiTimes,
     timeOptions,
     contextualReference: normalized.contextual_reference,
     confirmation: normalized.confirmation,
     actionRequested: normalized.action_requested,
     wantsExactSlot: Boolean(normalized.time),
   };
-}
-
-async function renderDepositReply(tenantId: string, db?: SupabaseClient): Promise<string> {
-  const policy = await getBotPolicy(tenantId, db);
-  if (!policy.requires_deposit) return "Por ahora no tengo una seña configurada para las reservas.";
-
-  if (policy.deposit_amount != null) return `La seña para reservar es de $${policy.deposit_amount}.`;
-  if (policy.deposit_percentage != null) return `La seña para reservar es del ${policy.deposit_percentage}% del turno.`;
-  return "Sí, para reservar se requiere seña. El monto te lo confirma el complejo.";
 }
 
 async function renderDepositLine(tenantId: string, db?: SupabaseClient): Promise<string> {
@@ -995,6 +1049,11 @@ export function parseBookingMessage(
   const suppliesMissingName = Boolean(customerName) && state?.intent === "booking" && state.status === "collecting_data";
   const suppliesMissingTime = Boolean(time || timeResolution.ambiguous) && state?.intent === "booking" && state.status === "collecting_data" && state.missing.includes("time");
   const suppliesDeposit = hasDepositProof && state?.intent === "booking" && state.missing.includes("deposit");
+  const hasPendingAwaitingDeposit =
+    state?.intent === "booking" &&
+    state.status === "collecting_data" &&
+    ((state.pending_deposit_reservation_ids?.length ?? 0) > 0 || state.missing?.includes("deposit"));
+  const changesPendingSlot = hasPendingAwaitingDeposit && !hasDepositProof && Boolean(date || time || timeResolution.ambiguous);
 
   let intent: AgentIntent = "unknown";
   let actionRequested: ParsedMessage["actionRequested"] = null;
@@ -1004,7 +1063,7 @@ export function parseBookingMessage(
   else if (confirmation.target_action === "reschedule") intent = "reschedule";
   else if (wantsCancel || (state?.intent === "cancel" && (date || time || reservationId))) intent = "cancel";
   else if (wantsReschedule || (state?.intent === "reschedule" && (date || time || reservationId))) intent = "reschedule";
-  else if (wantsReserve || suppliesMissingName || suppliesMissingTime || suppliesDeposit || confirmsPendingBooking || (hasCorrection && state?.intent === "booking")) intent = "booking";
+  else if (wantsReserve || suppliesMissingName || suppliesMissingTime || suppliesDeposit || confirmsPendingBooking || changesPendingSlot || (hasCorrection && state?.intent === "booking")) intent = "booking";
   else if (asksAvailability || followUpAvailability) intent = "availability";
 
   return {
@@ -1336,6 +1395,24 @@ async function persistState(
   });
 }
 
+function pendingReservationMatchesSlot(
+  state: AgentConversationState,
+  date: string,
+  time: string,
+): boolean {
+  // Use state.collected.date/time as the source of truth for the pending slot.
+  // candidate_reservations.starts_at may be unset when refs were synthesized.
+  if (state.collected.date && state.collected.time) {
+    return state.collected.date === date && state.collected.time === time;
+  }
+  const candidates = state.candidate_reservations ?? [];
+  return candidates.some((reservation) => {
+    if (reservation.starts_at?.includes(date) && reservation.starts_at.includes(`${time}:`)) return true;
+    if (reservation.label?.includes(date) && reservation.label.includes(time)) return true;
+    return false;
+  });
+}
+
 function buildPendingConfirmation(
   action: NonNullable<AgentConversationState["pending_confirmation"]>["action"],
   reservationIds: string[],
@@ -1448,6 +1525,14 @@ function parseDate(normalized: string, timezone: string, now: Date, priorDate: s
   const candidate = setDate(base, day);
   const resolved = candidate < addDays(localNow, -1) ? addMonths(candidate, 1) : candidate;
   return formatInTimeZone(resolved, timezone, "yyyy-MM-dd");
+}
+
+function detectMeridiem(normalized: string): "morning" | "evening" | null {
+  const morning = /\b(am|de\s+la\s+manana|por\s+la\s+manana|de\s+ma[nñ]ana|mediodia|medio\s+dia)\b/.test(normalized);
+  const evening = /\b(pm|de\s+la\s+tarde|por\s+la\s+tarde|de\s+la\s+noche|por\s+la\s+noche|de\s+tarde|de\s+noche)\b/.test(normalized);
+  if (morning && !evening) return "morning";
+  if (evening && !morning) return "evening";
+  return null;
 }
 
 function parseMultipleTimes(normalized: string): string[] | null {
