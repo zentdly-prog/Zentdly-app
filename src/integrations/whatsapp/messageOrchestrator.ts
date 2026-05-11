@@ -2,11 +2,9 @@ import { createServerClient } from "@/infrastructure/supabase/server";
 import { WhatsAppSender } from "./sender";
 import { ConversationHandler } from "@/domain/conversation/conversationHandler";
 import { CustomerRepository } from "@/infrastructure/repositories/customerRepository";
-import { buildAgentContext } from "@/integrations/ai/contextBuilder";
-import { runAgent } from "@/integrations/ai/agent";
 import { logAgentEvent, saveAgentState } from "@/domain/conversation/agentOps";
 import { handleDeterministicBookingMessage } from "@/domain/booking/deterministicRouter";
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { renderFallbackReply } from "@/domain/conversation/fallbackResponder";
 import type { WhatsAppIncomingMessage } from "./types";
 
 export async function handleIncomingMessage(
@@ -86,24 +84,14 @@ export async function handleIncomingMessage(
     return;
   }
 
-  const { systemPrompt, chatHistory } = await buildAgentContext(db, tenantId, conversation.id, customer.id);
-  const priorHistory = chatHistory.at(-1)?.role === "user" && chatHistory.at(-1)?.content === msg.text
-    ? chatHistory.slice(0, -1)
-    : chatHistory;
-
-  const replyText = await runAgent(
-    systemPrompt,
-    priorHistory as ChatCompletionMessageParam[],
-    msg.text,
-    {
-      db,
-      tenantId,
-      customerId: customer.id,
-      customerPhone: `+${msg.from}`,
-      timezone,
-      conversationId: conversation.id,
-    },
-  );
+  const replyText = await renderFallbackReply({
+    db,
+    tenantId,
+    customerId: customer.id,
+    conversationId: conversation.id,
+    timezone,
+    message: msg.text,
+  });
 
   await sender.sendText(msg.from, replyText);
   await conversationHandler.saveMessage(conversation.id, "outbound", replyText);

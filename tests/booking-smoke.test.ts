@@ -22,7 +22,27 @@ async function main() {
   await smokeStateIsolationForListAndAvailability();
   await smokeNameAfterExactAvailabilityCreatesPendingReservation();
   await smokeAudioRejectedPolicy();
+  await smokeSecondBookingDoesNotInheritFirst();
   console.log("booking smoke tests passed");
+}
+
+async function smokeSecondBookingDoesNotInheritFirst() {
+  const db = createSmokeDb();
+  const firstDate = futureDate(2);
+  const secondDate = futureDate(3);
+
+  // Reserva 1: padel mañana 20hs, nombre Mora, 3 canchas
+  const first = await route(db, `Quiero reservar 3 canchas de padel para ${firstDate} a las 20 a nombre de Mora`);
+  assert.match(first.reply ?? "", /Reserva pendiente para 3 canchas/i);
+  const proof = await route(db, "Te paso el comprobante");
+  assert.match(proof.reply ?? "", /Reserva confirmada con seña/i);
+
+  // Reserva 2 en la misma conversación, sin dar cantidad ni nombre — debe pedirlos, NO heredar 3 ni "Mora"
+  const second = await route(db, `Te pido otra cancha para ${secondDate} a las 21`);
+  assert.equal(second.handled, true, JSON.stringify(second));
+  assert.doesNotMatch(second.reply ?? "", /3 canchas/i, "no debe heredar las 3 canchas de la reserva anterior");
+  assert.doesNotMatch(second.reply ?? "", /Mora/i, "no debe heredar el nombre Mora");
+  assert.match(second.reply ?? "", /nombre/i, "debe pedir el nombre nuevamente");
 }
 
 async function smokeParseHumanLanguage() {

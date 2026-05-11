@@ -1,11 +1,9 @@
 import { createServerClient } from "@/infrastructure/supabase/server";
 import { evolutionSendText } from "./evolutionSender";
-import { buildAgentContext } from "@/integrations/ai/contextBuilder";
-import { runAgent } from "@/integrations/ai/agent";
 import { getBotPolicy } from "@/lib/actions/policies";
 import { logAgentEvent, saveAgentState } from "@/domain/conversation/agentOps";
 import { handleDeterministicBookingMessage } from "@/domain/booking/deterministicRouter";
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { renderFallbackReply } from "@/domain/conversation/fallbackResponder";
 
 export interface EvolutionIncomingMessage {
   instanceName: string;
@@ -198,25 +196,15 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
     return;
   }
 
-  const { systemPrompt, chatHistory } = await buildAgentContext(db, tenantId, conversation.id, customer.id);
-  const priorHistory = chatHistory.at(-1)?.role === "user" && chatHistory.at(-1)?.content === msg.text
-    ? chatHistory.slice(0, -1)
-    : chatHistory;
-
-  // ── 7. Run AI agent ─────────────────────────────────────────────────────────
-  const reply = await runAgent(
-    systemPrompt,
-    priorHistory as ChatCompletionMessageParam[],
-    msg.text,
-    {
-      db,
-      tenantId,
-      customerId: customer.id,
-      customerPhone: `+${msg.from}`,
-      timezone,
-      conversationId: conversation.id,
-    }
-  );
+  // ── 7. Deterministic fallback (no AI hallucinations) ────────────────────────
+  const reply = await renderFallbackReply({
+    db,
+    tenantId,
+    customerId: customer.id,
+    conversationId: conversation.id,
+    timezone,
+    message: msg.text,
+  });
 
   // ── 8. Send reply via Evolution ─────────────────────────────────────────────
   await evolutionSendText(msg.instanceName, msg.jid, reply);

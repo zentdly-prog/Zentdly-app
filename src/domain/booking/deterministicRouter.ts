@@ -57,8 +57,8 @@ interface ParsedMessage {
 export async function handleDeterministicBookingMessage(
   input: DeterministicRouterInput,
 ): Promise<DeterministicRouterResult> {
-  const state = await getAgentState(input.db, input.conversationId);
-  const normalizedIntent = await normalizeMessage(input, state);
+  const rawState = await getAgentState(input.db, input.conversationId);
+  const normalizedIntent = await normalizeMessage(input, rawState);
   const policyQuestion = parsePolicyQuestion(input.message);
   if (policyQuestion === "deposit") {
     const reply = await renderDepositReply(input.tenantId, input.db);
@@ -67,13 +67,22 @@ export async function handleDeterministicBookingMessage(
   }
 
   const parsed = normalizedIntent
-    ? normalizedIntentToParsedMessage(normalizedIntent, state)
-    : parseBookingMessage(input.message, input.timezone, state);
+    ? normalizedIntentToParsedMessage(normalizedIntent, rawState)
+    : parseBookingMessage(input.message, input.timezone, rawState);
   if (parsed.intent === "availability" && !messageHasExplicitTime(input.message)) {
     parsed.time = null;
     parsed.timeAmbiguous = false;
     parsed.timeOptions = null;
     parsed.wantsExactSlot = false;
+  }
+
+  const state = maybeResetStateForNewOperation(rawState, parsed);
+  if (state !== rawState) {
+    await logRouterEvent(input, "state_reset_for_new_operation", {
+      previousIntent: rawState.intent,
+      previousStatus: rawState.status,
+      newIntent: parsed.intent,
+    });
   }
 
   if (parsed.intent === "unknown" && parsed.actionRequested !== "list_reservations") return { handled: false };
@@ -767,6 +776,52 @@ export async function handleDeterministicBookingMessage(
   return { handled: false };
 }
 
+function maybeResetStateForNewOperation(
+  state: AgentConversationState,
+  parsed: ParsedMessage,
+): AgentConversationState {
+  const parsedIntent = parsed.intent;
+  const inConfirmation = state.status === "confirming";
+  const isConfirmationResponse =
+    parsed.confirmation?.is_confirmation || parsed.confirmation?.is_rejection;
+
+  // Respond to a pending confirmation prompt — do NOT reset.
+  if (inConfirmation && isConfirmationResponse) return state;
+
+  // Deposit proof for a pending reservation — do NOT reset (keeps pending IDs).
+  if (parsed.hasDepositProof && (state.pending_deposit_reservation_ids?.length || state.pending_reservation_ids?.length)) {
+    return state;
+  }
+
+  const previousFinished = state.status === "done" || state.status === "handoff" || state.status === "idle";
+  const intentChanged =
+    state.intent !== "unknown" &&
+    parsedIntent !== "unknown" &&
+    state.intent !== parsedIntent;
+
+  // Start of a brand-new booking after a completed one
+  const restartsBooking =
+    parsedIntent === "booking" &&
+    state.status === "done" &&
+    !!parsed.date &&
+    !!parsed.time;
+
+  if (!previousFinished && !intentChanged && !restartsBooking) return state;
+
+  return {
+    ...state,
+    collected: {},
+    missing: [],
+    last_offered_slots: [],
+    candidate_reservation_id: null,
+    candidate_reservation_ids: [],
+    candidate_reservations: [],
+    pending_confirmation: null,
+    // Preserve: pending_*_reservation_ids, last_created_reservation_ids,
+    // last_listed_reservations — user may still reference them.
+  };
+}
+
 function parsePolicyQuestion(message: string): "deposit" | null {
   const normalized = normalizeText(message);
   const mentionsDeposit = /\b(sena|deposito|senia|seña)\b/.test(normalized);
@@ -997,14 +1052,20 @@ async function resolveCancellationCandidates(input: {
     ? input.state.pending_deposit_reservation_ids
     : input.state.pending_reservation_ids ?? [];
 
+  const referencedIdFallback = lastListedIds.length
+    ? lastListedIds
+    : stateCandidateIds.length
+      ? stateCandidateIds
+      : lastCreatedIds;
+
   let reservationIds: string[] = [];
   if (input.reservationId) reservationIds = [input.reservationId];
   else if (referenceType === "last_created_reservations") reservationIds = lastCreatedIds;
   else if (referenceType === "last_pending_reservations") reservationIds = pendingIds;
-  else if (referenceType === "last_listed_reservations") reservationIds = lastListedIds.length ? lastListedIds : stateCandidateIds;
-  else if (referenceType === "customer_active_reservations") reservationIds = stateCandidateIds;
+  else if (referenceType === "last_listed_reservations") reservationIds = referencedIdFallback;
+  else if (referenceType === "customer_active_reservations") reservationIds = stateCandidateIds.length ? stateCandidateIds : lastCreatedIds;
   else if (scope === "last_group" || scope === "mentioned_quantity") {
-    reservationIds = stateCandidateIds.length ? stateCandidateIds : lastListedIds.length ? lastListedIds : lastCreatedIds;
+    reservationIds = referencedIdFallback;
   }
 
   const all = scope === "all" || (input.parsed.actionRequested === "cancel_many_reservations" && referenceType === "customer_active_reservations");
@@ -1052,14 +1113,20 @@ async function resolveChangeCandidates(input: {
     ? input.state.pending_deposit_reservation_ids
     : input.state.pending_reservation_ids ?? [];
 
+  const referencedIdFallback = lastListedIds.length
+    ? lastListedIds
+    : stateCandidateIds.length
+      ? stateCandidateIds
+      : lastCreatedIds;
+
   let reservationIds: string[] = [];
   if (input.reservationId) reservationIds = [input.reservationId];
   else if (referenceType === "last_created_reservations") reservationIds = lastCreatedIds;
   else if (referenceType === "last_pending_reservations") reservationIds = pendingIds;
-  else if (referenceType === "last_listed_reservations") reservationIds = lastListedIds.length ? lastListedIds : stateCandidateIds;
-  else if (referenceType === "customer_active_reservations") reservationIds = stateCandidateIds;
+  else if (referenceType === "last_listed_reservations") reservationIds = referencedIdFallback;
+  else if (referenceType === "customer_active_reservations") reservationIds = stateCandidateIds.length ? stateCandidateIds : lastCreatedIds;
   else if (scope === "last_group" || scope === "mentioned_quantity") {
-    reservationIds = stateCandidateIds.length ? stateCandidateIds : lastListedIds.length ? lastListedIds : lastCreatedIds;
+    reservationIds = referencedIdFallback;
   }
   else if (input.state.intent === "reschedule" && stateCandidateIds.length > 0) reservationIds = stateCandidateIds;
 
@@ -1206,6 +1273,7 @@ async function persistState(
     ?? [];
   const nextIntent = patch.intent ?? parsed.intent ?? state.intent;
   const nextStatus = patch.status ?? state.status;
+  const operationFinished = nextStatus === "done";
 
   await saveAgentState(input.db, input.conversationId, {
     current_intent: nextIntent,
@@ -1217,14 +1285,16 @@ async function persistState(
       action: parsed.actionRequested ?? state.operation?.action ?? null,
       updated_at: new Date().toISOString(),
     },
-    collected: {
-      sport: hasPatch("sport") ? patch.sport ?? null : parsed.sport ?? state.collected.sport ?? null,
-      date: hasPatch("date") ? patch.date ?? null : parsed.date ?? state.collected.date ?? null,
-      time: hasPatch("time") ? patch.time ?? null : parsed.time ?? state.collected.time ?? null,
-      customer_name: hasPatch("customerName") ? patch.customerName ?? null : parsed.customerName ?? state.collected.customer_name ?? null,
-      reservation_id: hasPatch("reservationId") ? patch.reservationId ?? null : parsed.reservationId ?? state.collected.reservation_id ?? null,
-      court_quantity: hasPatch("courtQuantity") ? patch.courtQuantity ?? null : parsed.courtQuantity ?? state.collected.court_quantity ?? null,
-    },
+    collected: operationFinished
+      ? {}
+      : {
+          sport: hasPatch("sport") ? patch.sport ?? null : parsed.sport ?? state.collected.sport ?? null,
+          date: hasPatch("date") ? patch.date ?? null : parsed.date ?? state.collected.date ?? null,
+          time: hasPatch("time") ? patch.time ?? null : parsed.time ?? state.collected.time ?? null,
+          customer_name: hasPatch("customerName") ? patch.customerName ?? null : parsed.customerName ?? state.collected.customer_name ?? null,
+          reservation_id: hasPatch("reservationId") ? patch.reservationId ?? null : parsed.reservationId ?? state.collected.reservation_id ?? null,
+          court_quantity: hasPatch("courtQuantity") ? patch.courtQuantity ?? null : parsed.courtQuantity ?? state.collected.court_quantity ?? null,
+        },
     missing: patch.missing ?? [],
     last_offered_slots: patch.lastOfferedSlots ?? state.last_offered_slots,
     candidate_reservation_id: patch.candidateReservationId ?? state.candidate_reservation_id,
@@ -1415,6 +1485,14 @@ function parseCourtQuantity(normalized: string): number | null {
   if (/\bdos\s+canchas\b/.test(normalized)) return 2;
   if (/\btres\s+canchas\b/.test(normalized)) return 3;
   if (/\bcuatro\s+canchas\b/.test(normalized)) return 4;
+
+  // "esas 3", "estas 4" — must not match "las 08:00" (time) or "las 10" mid-time-phrase
+  const grouped = normalized.match(/\b(?:esas?|estos?|estas?)\s+(\d{1,2})(?!\s*[:.]|\s+(?:hs|horas?|am|pm|hr))\b/);
+  if (grouped) return Math.max(1, Number(grouped[1]));
+  if (/\b(?:esas?|estos?|estas?)\s+dos\b/.test(normalized)) return 2;
+  if (/\b(?:esas?|estos?|estas?)\s+tres\b/.test(normalized)) return 3;
+  if (/\b(?:esas?|estos?|estas?)\s+cuatro\b/.test(normalized)) return 4;
+
   return null;
 }
 
