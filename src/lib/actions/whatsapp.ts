@@ -46,6 +46,24 @@ export async function saveWhatsAppConfig(_prev: unknown, formData: FormData) {
   return { ok: true };
 }
 
+export async function toggleWhatsAppBot(_prev: unknown, formData: FormData) {
+  const tenantId = formData.get("tenant_id") as string;
+  const enabled = formData.get("enabled") === "true";
+
+  const parsed = z.string().uuid().safeParse(tenantId);
+  if (!parsed.success) return { error: "Tenant inválido." };
+
+  const db = createServerClient();
+  const { error } = await db
+    .from("whatsapp_config")
+    .update({ connected: enabled, updated_at: new Date().toISOString() })
+    .eq("tenant_id", tenantId);
+
+  if (error) return { error: error.message };
+  revalidatePath(`/tenants/${tenantId}/whatsapp`);
+  return { ok: true, enabled };
+}
+
 function getEvolutionConfig() {
   const url = process.env.EVOLUTION_API_URL;
   const key = process.env.EVOLUTION_API_KEY;
@@ -80,6 +98,7 @@ export async function connectEvolutionWhatsApp(
       {
         tenant_id: tenantId,
         provider: "evolution",
+        connected: true,
         evolution_api_url: evolutionUrl,
         evolution_api_key: evolutionKey,
         evolution_instance_name: instanceName,

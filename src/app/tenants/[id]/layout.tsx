@@ -5,8 +5,13 @@ import { notFound } from "next/navigation";
 const TABS = [
   { href: "", label: "General" },
   { href: "/courts", label: "Canchas" },
+  { href: "/reservations", label: "Reservas" },
+  { href: "/calendar", label: "Calendario" },
+  { href: "/policies", label: "Políticas" },
   { href: "/whatsapp", label: "WhatsApp" },
+  { href: "/inbox", label: "Conversaciones" },
   { href: "/bot", label: "Bot / IA" },
+  { href: "/logs", label: "Logs" },
   { href: "/google", label: "Google" },
 ];
 

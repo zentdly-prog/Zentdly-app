@@ -5,7 +5,7 @@ export async function evolutionSendText(instanceName: string, to: string, text: 
   const res = await fetch(`${BASE_URL}/message/sendText/${instanceName}`, {
     method: "POST",
     headers: { apikey: API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ number: to, textMessage: { text } }),
+    body: JSON.stringify({ number: to, text }),
   });
 
   if (!res.ok) {

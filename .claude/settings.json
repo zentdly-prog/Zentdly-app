@@ -12,6 +12,6 @@
       "TodoWrite(*)",
       "Agent(*)"
     ],
-    "defaultMode": "acceptEdits"
+    "defaultMode": "auto"
   }
 }

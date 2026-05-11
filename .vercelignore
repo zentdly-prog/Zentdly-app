@@ -1,0 +1,9 @@
+.env
+.env.*
+.claude/
+.vercel/
+.next/
+node_modules/
+tsconfig.tsbuildinfo
+n8n/
+supabase/.temp/

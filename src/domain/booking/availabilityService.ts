@@ -3,7 +3,6 @@ import { toZonedTime } from "date-fns-tz";
 import { generateSlots, slotsOverlap } from "@/lib/utils/date";
 import type { AvailabilityRepository } from "@/infrastructure/repositories/availabilityRepository";
 import type { ReservationRepository } from "@/infrastructure/repositories/reservationRepository";
-import { ValidationError } from "@/lib/errors";
 
 export interface AvailabilitySlot {
   court_id: string;
@@ -29,7 +28,6 @@ export class AvailabilityService {
   ) {}
 
   async getAvailableSlots(input: CheckAvailabilityInput): Promise<AvailabilitySlot[]> {
-    const localDate = parseISO(input.date);
     const dayOfWeek = toZonedTime(
       new Date(`${input.date}T12:00:00Z`),
       input.timezone,
@@ -78,16 +76,12 @@ export class AvailabilityService {
   }
 
   async isSlotAvailable(
-    courtId: string,
+    courtTypeId: string,
     startsAt: Date,
     endsAt: Date,
-    venueId: string,
   ): Promise<boolean> {
-    const [reservations, closures] = await Promise.all([
-      this.reservationRepo.findActiveByCourtAndRange(courtId, startsAt, endsAt),
-      this.availRepo.getClosures(venueId, courtId, startsAt, endsAt),
-    ]);
-    return reservations.length === 0 && closures.length === 0;
+    const reservations = await this.reservationRepo.findActiveByCourtAndRange(courtTypeId, startsAt, endsAt);
+    return reservations.length === 0;
   }
 
   async findAlternativeSlots(

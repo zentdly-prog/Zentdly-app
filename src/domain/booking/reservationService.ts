@@ -8,9 +8,7 @@ import { ConflictError, ValidationError } from "@/lib/errors";
 
 export const CreateReservationSchema = z.object({
   tenant_id: z.string().uuid(),
-  venue_id: z.string().uuid(),
-  court_id: z.string().uuid(),
-  sport_id: z.string().uuid(),
+  court_type_id: z.string().uuid(),
   customer_phone: z.string().min(7),
   customer_name: z.string().optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -42,10 +40,9 @@ export class ReservationService {
     const endsAt = new Date(startsAt.getTime() + input.duration_minutes * 60 * 1000);
 
     const available = await this.availabilityService.isSlotAvailable(
-      input.court_id,
+      input.court_type_id,
       startsAt,
       endsAt,
-      input.venue_id,
     );
 
     if (!available) {
@@ -62,10 +59,8 @@ export class ReservationService {
 
     const reservation = await this.reservationRepo.create({
       tenant_id: input.tenant_id,
-      venue_id: input.venue_id,
-      court_id: input.court_id,
+      court_type_id: input.court_type_id,
       customer_id: customer.id,
-      sport_id: input.sport_id,
       starts_at: startsAt,
       ends_at: endsAt,
       source: input.source,
@@ -114,10 +109,9 @@ export class ReservationService {
     const endsAt = new Date(startsAt.getTime() + newInput.duration_minutes * 60 * 1000);
 
     const available = await this.availabilityService.isSlotAvailable(
-      existing.court_id,
+      existing.court_type_id ?? "",
       startsAt,
       endsAt,
-      existing.venue_id,
     );
 
     if (!available) {
@@ -136,10 +130,8 @@ export class ReservationService {
 
     const newReservation = await this.reservationRepo.create({
       tenant_id: existing.tenant_id,
-      venue_id: existing.venue_id,
-      court_id: existing.court_id,
+      court_type_id: existing.court_type_id ?? "",
       customer_id: existing.customer_id,
-      sport_id: existing.sport_id,
       starts_at: startsAt,
       ends_at: endsAt,
       source: existing.source as "whatsapp" | "panel" | "api",

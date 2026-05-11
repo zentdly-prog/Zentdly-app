@@ -1,18 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createServerClient } from "@/infrastructure/supabase/server";
-import { AvailabilityRepository } from "@/infrastructure/repositories/availabilityRepository";
-import { ReservationRepository } from "@/infrastructure/repositories/reservationRepository";
-import { AvailabilityService } from "@/domain/booking/availabilityService";
-import { ZentdlyError } from "@/lib/errors";
+import { AgentAvailabilityService } from "@/domain/booking/agentBookingServices";
 
 const QuerySchema = z.object({
   tenant_id: z.string().uuid(),
-  venue_id: z.string().uuid(),
-  sport_id: z.string().uuid().optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  sport_name: z.string().trim().optional(),
   timezone: z.string().default("America/Argentina/Buenos_Aires"),
-  duration_minutes: z.coerce.number().int().positive().optional(),
 });
 
 export async function GET(req: NextRequest) {
@@ -21,20 +16,16 @@ export async function GET(req: NextRequest) {
     const input = QuerySchema.parse(params);
 
     const db = createServerClient();
-    const availRepo = new AvailabilityRepository(db);
-    const reservationRepo = new ReservationRepository(db);
-    const service = new AvailabilityService(availRepo, reservationRepo);
+    const service = new AgentAvailabilityService(db, input.tenant_id, input.timezone);
+    const courts = await service.getAvailability(input.date, input.sport_name);
+    const message = await service.check(input.date, input.sport_name);
 
-    const slots = await service.getAvailableSlots(input);
-
-    return NextResponse.json({ slots });
+    return NextResponse.json({ courts, message });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation error", details: err.issues }, { status: 422 });
     }
-    if (err instanceof ZentdlyError) {
-      return NextResponse.json({ error: err.message }, { status: err.statusCode });
-    }
+    console.error("[api/availability]", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

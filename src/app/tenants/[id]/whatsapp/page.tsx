@@ -10,5 +10,17 @@ export default async function WhatsAppPage({
 }) {
   const { id } = await params;
   const config = await getWhatsAppConfig(id);
-  return <WhatsAppClient tenantId={id} initialConfig={config} />;
+  const safeConfig = config
+    ? {
+        provider: config.provider,
+        bot_enabled: config.connected,
+        meta_phone_number_id: config.meta_phone_number_id,
+        meta_access_token: config.meta_access_token,
+        meta_verify_token: config.meta_verify_token,
+        meta_app_secret: config.meta_app_secret,
+        meta_business_id: config.meta_business_id,
+      }
+    : null;
+
+  return <WhatsAppClient tenantId={id} initialConfig={safeConfig} />;
 }

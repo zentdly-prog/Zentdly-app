@@ -1,35 +1,10 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { GoogleSheetsProvider } from "./sheetsProvider";
 import { GoogleCalendarProvider } from "./calendarProvider";
-import type { GoogleIntegrationProvider } from "./types";
-import type { Reservation, IntegrationSettings } from "@/types/database";
-import { ReservationRepository } from "@/infrastructure/repositories/reservationRepository";
+import type { Reservation } from "@/types/database";
 
 export class IntegrationOrchestrator {
   constructor(private readonly db: SupabaseClient) {}
-
-  private buildProvider(settings: IntegrationSettings, timezone: string): GoogleIntegrationProvider | null {
-    const cfg = settings.config as Record<string, unknown>;
-
-    if (settings.provider === "google_sheets") {
-      return new GoogleSheetsProvider({
-        credentials: cfg.credentials as { client_email: string; private_key: string },
-        spreadsheet_id: cfg.spreadsheet_id as string,
-        sheet_name: cfg.sheet_name as string | undefined,
-        timezone,
-      });
-    }
-
-    if (settings.provider === "google_calendar") {
-      return new GoogleCalendarProvider({
-        credentials: cfg.credentials as { client_email: string; private_key: string },
-        calendar_id: cfg.calendar_id as string,
-        timezone,
-      });
-    }
-
-    return null;
-  }
 
   async syncAfterCreate(
     reservation: Reservation,
@@ -37,32 +12,46 @@ export class IntegrationOrchestrator {
     customerPhone: string,
     timezone: string,
   ): Promise<void> {
-    const { data: settings } = await this.db
-      .from("integration_settings")
+    const { data: config } = await this.db
+      .from("google_config")
       .select("*")
       .eq("tenant_id", reservation.tenant_id)
-      .eq("active", true);
+      .maybeSingle();
 
-    if (!settings?.length) return;
+    if (!config?.service_account) return;
 
-    const repo = new ReservationRepository(this.db);
+    const credentials = {
+      client_email: config.service_account.client_email as string,
+      private_key: config.service_account.private_key as string,
+    };
 
-    for (const setting of settings as IntegrationSettings[]) {
-      const provider = this.buildProvider(setting, timezone);
-      if (!provider) continue;
-
+    if (config.calendar_enabled && config.calendar_id) {
       try {
-        const result = await provider.syncReservation(reservation, customerName, customerPhone);
-
-        await repo.updateStatus(
-          reservation.id,
-          reservation.status,
-          setting.provider === "google_calendar" ? result.externalId : undefined,
-          setting.provider === "google_sheets" ? result.externalId : undefined,
-        );
+        const calendar = new GoogleCalendarProvider({
+          credentials,
+          calendar_id: config.calendar_id,
+          timezone,
+        });
+        const result = await calendar.syncReservation(reservation, customerName, customerPhone);
+        await this.db.from("reservations").update({ external_event_id: result.externalId }).eq("id", reservation.id);
       } catch (err) {
-        console.error(`[integration] sync failed for provider ${setting.provider}:`, err);
-        // Non-blocking: log and continue
+        console.error("[integration] calendar sync failed:", err);
+      }
+    }
+
+    if (config.sheets_enabled && config.spreadsheet_id) {
+      try {
+        const sheets = new GoogleSheetsProvider({
+          credentials,
+          spreadsheet_id: config.spreadsheet_id,
+          sheet_name: config.sheet_name ?? "Reservas",
+          timezone,
+        });
+        await sheets.ensureHeaders();
+        const result = await sheets.syncReservation(reservation, customerName, customerPhone);
+        await this.db.from("reservations").update({ external_sheet_row_id: result.externalId }).eq("id", reservation.id);
+      } catch (err) {
+        console.error("[integration] sheets sync failed:", err);
       }
     }
   }
@@ -71,29 +60,43 @@ export class IntegrationOrchestrator {
     reservation: Reservation,
     timezone: string,
   ): Promise<void> {
-    const { data: settings } = await this.db
-      .from("integration_settings")
+    const { data: config } = await this.db
+      .from("google_config")
       .select("*")
       .eq("tenant_id", reservation.tenant_id)
-      .eq("active", true);
+      .maybeSingle();
 
-    if (!settings?.length) return;
+    if (!config?.service_account) return;
 
-    for (const setting of settings as IntegrationSettings[]) {
-      const provider = this.buildProvider(setting, timezone);
-      if (!provider) continue;
+    const credentials = {
+      client_email: config.service_account.client_email as string,
+      private_key: config.service_account.private_key as string,
+    };
 
-      const externalId =
-        setting.provider === "google_calendar"
-          ? reservation.external_event_id
-          : reservation.external_sheet_row_id;
-
-      if (!externalId) continue;
-
+    if (config.calendar_enabled && config.calendar_id && reservation.external_event_id) {
       try {
-        await provider.deleteReservation(externalId);
+        const calendar = new GoogleCalendarProvider({
+          credentials,
+          calendar_id: config.calendar_id,
+          timezone,
+        });
+        await calendar.deleteReservation(reservation.external_event_id);
       } catch (err) {
-        console.error(`[integration] cancel sync failed for provider ${setting.provider}:`, err);
+        console.error("[integration] calendar cancel sync failed:", err);
+      }
+    }
+
+    if (config.sheets_enabled && config.spreadsheet_id && reservation.external_sheet_row_id) {
+      try {
+        const sheets = new GoogleSheetsProvider({
+          credentials,
+          spreadsheet_id: config.spreadsheet_id,
+          sheet_name: config.sheet_name ?? "Reservas",
+          timezone,
+        });
+        await sheets.deleteReservation(reservation.external_sheet_row_id);
+      } catch (err) {
+        console.error("[integration] sheets cancel sync failed:", err);
       }
     }
   }

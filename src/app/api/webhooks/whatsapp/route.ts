@@ -36,10 +36,11 @@ export async function POST(req: NextRequest) {
   if (payload.event === "messages.upsert") {
     const msg = parseEvolutionPayload(payload);
     if (msg) {
-      // Fire-and-forget: return 200 immediately so Evolution doesn't retry/timeout
-      handleEvolutionMessage(msg).catch((err) => {
+      try {
+        await handleEvolutionMessage(msg);
+      } catch (err) {
         console.error("[evolution webhook] error:", err);
-      });
+      }
     }
     return new NextResponse("OK", { status: 200 });
   }
@@ -66,7 +67,7 @@ export async function POST(req: NextRequest) {
     return new NextResponse("OK", { status: 200 });
   }
 
-  handleIncomingMessage(msg, tenantId, timezone).catch((err) => {
+  await handleIncomingMessage(msg, tenantId, timezone).catch((err) => {
     console.error("[whatsapp webhook] handleIncomingMessage error:", err);
   });
 
@@ -84,9 +85,11 @@ function parseEvolutionPayload(payload: Record<string, unknown>): EvolutionIncom
     if (key?.fromMe) return null; // skip our own messages
 
     const remoteJid = key?.remoteJid as string;
+    const remoteJidAlt = key?.remoteJidAlt as string | undefined;
     if (!remoteJid || remoteJid.includes("@g.us")) return null; // skip groups
 
-    const from = remoteJid.split("@")[0];
+    const fromJid = remoteJid.endsWith("@lid") && remoteJidAlt ? remoteJidAlt : remoteJid;
+    const from = fromJid.split("@")[0];
     // @lid = Meta's new privacy JID format — must send back using the full JID
     const jid = remoteJid;
     const text =
@@ -94,15 +97,22 @@ function parseEvolutionPayload(payload: Record<string, unknown>): EvolutionIncom
       ((message?.extendedTextMessage as Record<string, unknown>)?.text as string) ??
       null;
 
-    if (!text?.trim()) return null;
+    const messageType =
+      message?.audioMessage ? "audio" :
+      message?.imageMessage ? "image" :
+      text?.trim() ? "text" :
+      "unknown";
+
+    if (!text?.trim() && !["audio", "image"].includes(messageType)) return null;
 
     return {
       instanceName: payload.instance as string,
       from,
       jid,
-      text: text.trim(),
+      text: text?.trim() || (messageType === "image" ? "[image]" : "[audio]"),
       messageId: key?.id as string,
       pushName: data?.pushName as string | undefined,
+      messageType,
     };
   } catch {
     return null;

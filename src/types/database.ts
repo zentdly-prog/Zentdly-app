@@ -37,6 +37,10 @@ export interface Court {
   venue_id: string;
   sport_id: string;
   name: string;
+  description?: string | null;
+  has_roof?: boolean | null;
+  synthetic_grass?: boolean | null;
+  acrylic?: boolean | null;
   capacity: number | null;
   active: boolean;
   created_at: string;
@@ -93,10 +97,11 @@ export interface Message {
 export interface Reservation {
   id: string;
   tenant_id: string;
-  venue_id: string;
-  court_id: string;
+  venue_id: string | null;
+  court_id: string | null;
   customer_id: string;
-  sport_id: string;
+  sport_id: string | null;
+  court_type_id: string | null;
   starts_at: string;
   ends_at: string;
   status: ReservationStatus;

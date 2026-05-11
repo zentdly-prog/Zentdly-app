@@ -33,9 +33,10 @@ export class GoogleCalendarProvider implements GoogleIntegrationProvider {
     // Idempotent: use reservation.id as iCalUID
     const iCalUID = `zentdly-${reservation.id}@zentdly.app`;
 
+    const courtLabel = reservation.notes ? ` - ${reservation.notes}` : "";
     const event = {
-      summary: `Reserva: ${customerName}`,
-      description: `Cliente: ${customerName}\nTeléfono: ${customerPhone}\nOrigen: ${reservation.source}`,
+      summary: `Reserva${courtLabel}: ${customerName}`,
+      description: `Cliente: ${customerName}\nTeléfono: ${customerPhone}\n${reservation.notes ? `Cancha: ${reservation.notes}\n` : ""}Origen: ${reservation.source}`,
       start: {
         dateTime: reservation.starts_at,
         timeZone: this.config.timezone,

@@ -4,10 +4,8 @@ import { ConflictError, NotFoundError } from "@/lib/errors";
 
 export interface CreateReservationInput {
   tenant_id: string;
-  venue_id: string;
-  court_id: string;
+  court_type_id: string;
   customer_id: string;
-  sport_id: string;
   starts_at: Date;
   ends_at: Date;
   status?: ReservationStatus;
@@ -30,14 +28,14 @@ export class ReservationRepository {
   }
 
   async findActiveByCourtAndRange(
-    courtId: string,
+    courtTypeId: string,
     startsAt: Date,
     endsAt: Date,
   ): Promise<Reservation[]> {
     const { data, error } = await this.db
       .from("reservations")
       .select("*")
-      .eq("court_id", courtId)
+      .eq("court_type_id", courtTypeId)
       .in("status", ["pending", "confirmed"])
       .lt("starts_at", endsAt.toISOString())
       .gt("ends_at", startsAt.toISOString());
@@ -52,7 +50,7 @@ export class ReservationRepository {
 
     const { data, error } = await this.db
       .from("reservations")
-      .select("*, courts(name), customers(name, phone_e164), sports(name)")
+      .select("*, customers(name, phone_e164), court_types(sport_name)")
       .eq("tenant_id", tenantId)
       .gte("starts_at", dayStart)
       .lte("starts_at", dayEnd)
@@ -67,10 +65,8 @@ export class ReservationRepository {
       .from("reservations")
       .insert({
         tenant_id: input.tenant_id,
-        venue_id: input.venue_id,
-        court_id: input.court_id,
+        court_type_id: input.court_type_id,
         customer_id: input.customer_id,
-        sport_id: input.sport_id,
         starts_at: input.starts_at.toISOString(),
         ends_at: input.ends_at.toISOString(),
         status: input.status ?? "confirmed",

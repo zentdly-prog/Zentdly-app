@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useState, useTransition, useEffect, useRef } from "react";
-import { connectEvolutionWhatsApp, saveWhatsAppConfig, checkEvolutionConnection } from "@/lib/actions/whatsapp";
+import { connectEvolutionWhatsApp, saveWhatsAppConfig, checkEvolutionConnection, toggleWhatsAppBot } from "@/lib/actions/whatsapp";
 import { SubmitButton } from "@/components/SubmitButton";
 import { Alert } from "@/components/Alert";
 
@@ -9,6 +9,7 @@ type QrStatus = "idle" | "loading" | "qr" | "connected" | "error";
 
 type Config = {
   provider?: string;
+  bot_enabled?: boolean | null;
   meta_phone_number_id?: string | null;
   meta_access_token?: string | null;
   meta_verify_token?: string | null;
@@ -25,6 +26,12 @@ export default function WhatsAppClient({
 }) {
   const savedProvider = initialConfig?.provider === "meta" ? "meta" : "evolution";
   const [provider, setProvider] = useState<"evolution" | "meta">(savedProvider);
+  const [qrStatus, setQrStatus] = useState<QrStatus>("idle");
+  const [qr, setQr] = useState<string | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const qrRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Check on mount if already connected
   useEffect(() => {
@@ -35,15 +42,6 @@ export default function WhatsAppClient({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Evolution QR state
-  const [qrStatus, setQrStatus] = useState<QrStatus>("idle");
-  const [qr, setQr] = useState<string | null>(null);
-  const [qrError, setQrError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const qrRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Poll connection state while QR is shown + auto-refresh QR before it expires
   useEffect(() => {
@@ -83,6 +81,8 @@ export default function WhatsAppClient({
 
   // Meta form state
   const [metaState, metaAction] = useActionState(saveWhatsAppConfig, null);
+  const [botState, botAction] = useActionState(toggleWhatsAppBot, null);
+  const botEnabled = botState?.enabled ?? initialConfig?.bot_enabled ?? true;
 
   const webhookUrl = `https://zentdly-app.vercel.app/api/webhooks/whatsapp`;
 
@@ -110,6 +110,32 @@ export default function WhatsAppClient({
       <p className="text-sm text-gray-500 mb-6">
         Elegí cómo conectar WhatsApp a este negocio.
       </p>
+
+      <form action={botAction} className={`mb-6 rounded-xl border p-4 ${botEnabled ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+        <input type="hidden" name="tenant_id" value={tenantId} />
+        <input type="hidden" name="enabled" value={botEnabled ? "false" : "true"} />
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className={`text-sm font-semibold ${botEnabled ? "text-green-900" : "text-red-900"}`}>
+              Bot {botEnabled ? "activo" : "pausado"}
+            </p>
+            <p className={`text-xs ${botEnabled ? "text-green-700" : "text-red-700"}`}>
+              {botEnabled
+                ? "Responde automáticamente los mensajes entrantes."
+                : "Guarda mensajes, pero no responde automáticamente."}
+            </p>
+          </div>
+          <button
+            type="submit"
+            className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors ${
+              botEnabled ? "bg-red-600 hover:bg-red-700" : "bg-green-600 hover:bg-green-700"
+            }`}
+          >
+            {botEnabled ? "Pausar" : "Activar"}
+          </button>
+        </div>
+        {botState?.error && <p className="mt-2 text-xs text-red-600">{botState.error}</p>}
+      </form>
 
       {/* Toggle */}
       <div className="flex bg-gray-100 rounded-xl p-1 mb-6">

@@ -104,17 +104,17 @@ export default function GoogleClient({
                 <li>Abrí <strong>calendar.google.com</strong></li>
                 <li>En el panel izquierdo, encontrá el calendario que querés usar</li>
                 <li>Hacé clic en los <strong>tres puntos</strong> al lado del nombre → <strong>Configuración y uso compartido</strong></li>
-                <li>En la sección <strong>"Compartir con determinadas personas"</strong>, hacé clic en <strong>+ Agregar personas</strong></li>
+                <li>En la sección <strong>&quot;Compartir con determinadas personas&quot;</strong>, hacé clic en <strong>+ Agregar personas</strong></li>
                 <li>Pegá el <code className="bg-amber-100 px-0.5 rounded">client_email</code> del JSON que cargaste arriba</li>
-                <li>En permisos elegí <strong>"Realizar cambios en eventos"</strong></li>
+                <li>En permisos elegí <strong>&quot;Realizar cambios en eventos&quot;</strong></li>
                 <li>Hacé clic en <strong>Enviar</strong></li>
               </ol>
             </div>
             <div className="space-y-1">
               <p className="font-medium text-amber-800">Paso 2 — Copiar el Calendar ID</p>
               <ol className="list-decimal list-inside space-y-0.5 text-amber-700 pl-1">
-                <li>En la misma pantalla de configuración, bajá hasta la sección <strong>"Integrar calendario"</strong></li>
-                <li>Copiá el valor de <strong>"ID del calendario"</strong> — termina en <code className="bg-amber-100 px-0.5 rounded">@group.calendar.google.com</code></li>
+                <li>En la misma pantalla de configuración, bajá hasta la sección <strong>&quot;Integrar calendario&quot;</strong></li>
+                <li>Copiá el valor de <strong>&quot;ID del calendario&quot;</strong> — termina en <code className="bg-amber-100 px-0.5 rounded">@group.calendar.google.com</code></li>
                 <li>Si querés usar tu calendario personal principal, usá <code className="bg-amber-100 px-0.5 rounded">primary</code></li>
                 <li>Pegalo en el campo de abajo</li>
               </ol>
