@@ -103,6 +103,18 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
     if (existingMessage) return;
   }
 
+  // ── 4b. Skip if inbound exactly matches bot's last outbound (echo guard) ───
+  if (await isEchoOfOwnReply(db, conversation.id, msg.text)) {
+    await logAgentEvent(db, {
+      tenantId,
+      conversationId: conversation.id,
+      customerId: customer.id,
+      eventType: "echo_dropped",
+      payload: { text: msg.text.slice(0, 200) },
+    });
+    return;
+  }
+
   // ── 5. Save inbound before any AI/context work so failures are traceable ───
   await db.from("messages").insert({
     conversation_id: conversation.id,
@@ -237,6 +249,28 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   syncGoogleIfNeeded(db, tenantId).catch((e) =>
     console.error("[agent] Google sync error:", e)
   );
+}
+
+async function isEchoOfOwnReply(
+  db: ReturnType<typeof createServerClient>,
+  conversationId: string,
+  inboundText: string,
+): Promise<boolean> {
+  const normalized = inboundText.trim();
+  if (normalized.length < 20) return false; // too short to be a reliable match
+
+  const since = new Date(Date.now() - 5 * 60_000).toISOString();
+  const { data: lastOutbound } = await db
+    .from("messages")
+    .select("content")
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(3);
+
+  if (!lastOutbound?.length) return false;
+  return lastOutbound.some((m) => (m.content as string).trim() === normalized);
 }
 
 async function getConversationControl(

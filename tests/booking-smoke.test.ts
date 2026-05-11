@@ -23,7 +23,61 @@ async function main() {
   await smokeNameAfterExactAvailabilityCreatesPendingReservation();
   await smokeAudioRejectedPolicy();
   await smokeSecondBookingDoesNotInheritFirst();
+  await smokeBareNameCompletesBooking();
+  await smokeMultiTimeBookingInOneMessage();
   console.log("booking smoke tests passed");
+}
+
+async function smokeMultiTimeBookingInOneMessage() {
+  const db = createSmokeDb();
+  const date = futureDate(7);
+
+  // One message asking for 4 different times — name not provided yet
+  const offer = await route(
+    db,
+    `Quiero reservar para ${date}: una a las 14, otra a las 16, otra a las 18 y la ultima a las 21`,
+  );
+  assert.equal(offer.handled, true, JSON.stringify(offer));
+  assert.match(offer.reply ?? "", /4 horarios/i, JSON.stringify(offer));
+  assert.match(offer.reply ?? "", /nombre/i);
+  assert.equal(db.reservations.length, 0);
+
+  // Provide the name — bot should now create 4 pending reservations
+  const result = await route(db, "a nombre de Mateo");
+  assert.equal(result.handled, true, JSON.stringify(result));
+  assert.match(result.reply ?? "", /14:00/);
+  assert.match(result.reply ?? "", /16:00/);
+  assert.match(result.reply ?? "", /18:00/);
+  assert.match(result.reply ?? "", /21:00/);
+  const pendingCount = db.reservations.filter((r) => r.status === "pending").length;
+  assert.equal(pendingCount, 4, `expected 4 pending reservations, got ${pendingCount}`);
+}
+
+async function smokeBareNameCompletesBooking() {
+  // "de santiago" alone should complete the booking when only name is missing
+  const dbA = createSmokeDb();
+  const dateA = futureDate(4);
+  const askA = await route(dbA, `Quiero reservar para ${dateA} a las 20:00`);
+  assert.match(askA.reply ?? "", /A nombre de qui[eé]n/i);
+  const completeA = await route(dbA, "de Santiago");
+  assert.match(completeA.reply ?? "", /Reserva pendiente/i, JSON.stringify(completeA));
+  assert.equal(dbA.reservations.length, 1);
+  assert.equal((dbA.reservations[0].notes as string | null) ?? "", "Cancha 1");
+
+  // Lone first name (no prefix) should also complete
+  const dbB = createSmokeDb();
+  const dateB = futureDate(5);
+  await route(dbB, `Quiero reservar para ${dateB} a las 21:00`);
+  const completeB = await route(dbB, "Ernesto Sabato");
+  assert.match(completeB.reply ?? "", /Reserva pendiente/i, JSON.stringify(completeB));
+  assert.equal(dbB.reservations.length, 1);
+
+  // "soy X" works too
+  const dbC = createSmokeDb();
+  const dateC = futureDate(6);
+  await route(dbC, `Tenes para ${dateC} a las 19:00?`);
+  const completeC = await route(dbC, "soy Mateo");
+  assert.match(completeC.reply ?? "", /Reserva pendiente/i, JSON.stringify(completeC));
 }
 
 async function smokeSecondBookingDoesNotInheritFirst() {

@@ -39,6 +39,7 @@ interface ParsedMessage {
   intent: AgentIntent;
   date: string | null;
   time: string | null;
+  multiTimes: string[] | null;
   sport: string | null;
   customerName: string | null;
   reservationId: string | null;
@@ -67,7 +68,7 @@ export async function handleDeterministicBookingMessage(
   }
 
   const parsed = normalizedIntent
-    ? normalizedIntentToParsedMessage(normalizedIntent, rawState)
+    ? normalizedIntentToParsedMessage(normalizedIntent, rawState, input.message)
     : parseBookingMessage(input.message, input.timezone, rawState);
   if (parsed.intent === "availability" && !messageHasExplicitTime(input.message)) {
     parsed.time = null;
@@ -142,6 +143,11 @@ export async function handleDeterministicBookingMessage(
   const customerName = parsed.customerName ?? (canUseCollected ? state.collected.customer_name ?? null : null);
   const reservationId = parsed.reservationId ?? (canUseCollected ? state.collected.reservation_id ?? null : null);
   const courtQuantity = parsed.courtQuantity ?? (canUseCollected ? state.collected.court_quantity ?? 1 : 1);
+  const multiTimes = parsed.multiTimes && parsed.multiTimes.length >= 2
+    ? parsed.multiTimes
+    : (canUseCollected && state.collected.multi_times && state.collected.multi_times.length >= 2
+        ? state.collected.multi_times
+        : null);
 
   if (parsed.timeAmbiguous && parsed.timeOptions) {
     await persistState(input, state, parsed, {
@@ -544,6 +550,21 @@ export async function handleDeterministicBookingMessage(
       }
     }
 
+    if (multiTimes && !parsed.hasDepositProof) {
+      const result = await handleMultiTimeBooking({
+        input,
+        state,
+        parsed,
+        booking,
+        policy,
+        date,
+        sport,
+        customerName,
+        multiTimes,
+      });
+      if (result) return result;
+    }
+
     if (!date || !time) {
       await persistState(input, state, parsed, {
         intent: "booking",
@@ -873,6 +894,7 @@ async function loadShortHistory(
 function normalizedIntentToParsedMessage(
   normalized: NormalizedIntent,
   state: AgentConversationState,
+  rawMessage: string,
 ): ParsedMessage {
   const fallbackIntent: AgentIntent =
     normalized.intent === "booking" || normalized.intent === "deposit_confirmation" ? "booking" :
@@ -884,7 +906,9 @@ function normalizedIntentToParsedMessage(
     normalized.confirmation.is_confirmation && state.intent !== "unknown" ? state.intent :
     "unknown";
 
-  const timeOptions = normalized.time_ambiguous
+  const multiTimes = fallbackIntent === "booking" ? parseMultipleTimes(normalizeText(rawMessage)) : null;
+
+  const timeOptions = normalized.time_ambiguous && !multiTimes
     ? {
         morning: normalized.time_options[0] ?? "08:00",
         evening: normalized.time_options[1] ?? "20:00",
@@ -899,7 +923,8 @@ function normalizedIntentToParsedMessage(
   return {
     intent: fallbackIntent,
     date: normalized.date,
-    time: normalized.time,
+    time: multiTimes ? multiTimes[0] : normalized.time,
+    multiTimes,
     sport: normalized.sport,
     customerName: normalized.customer_name,
     reservationId: normalized.reservation_id ?? contextualReservationId,
@@ -942,10 +967,11 @@ export function parseBookingMessage(
 ): ParsedMessage {
   const normalized = normalizeText(message);
   const date = parseDate(normalized, timezone, now, state?.collected.date ?? null);
+  const multiTimes = parseMultipleTimes(normalized);
   const timeResolution = parseTime(normalized, state);
-  const time = timeResolution.time;
+  const time = multiTimes ? multiTimes[0] : timeResolution.time;
   const sport = parseSport(normalized);
-  const customerName = parseCustomerName(message);
+  const customerName = parseCustomerName(message, state);
   const reservationId = parseReservationId(normalized);
   const courtQuantity = parseCourtQuantity(normalized);
   const asksUnsupportedSport = /\bfutbol\b|\bfutbol\s*7\b|\bf7\b|\bfutbol\s*5\b/.test(normalized);
@@ -992,8 +1018,9 @@ export function parseBookingMessage(
     asksUnsupportedSport,
     hasCorrection,
     hasDepositProof,
-    timeAmbiguous: timeResolution.ambiguous,
-    timeOptions: timeResolution.options,
+    timeAmbiguous: timeResolution.ambiguous && !multiTimes,
+    timeOptions: multiTimes ? null : timeResolution.options,
+    multiTimes,
     contextualReference,
     confirmation,
     actionRequested,
@@ -1423,6 +1450,48 @@ function parseDate(normalized: string, timezone: string, now: Date, priorDate: s
   return formatInTimeZone(resolved, timezone, "yyyy-MM-dd");
 }
 
+function parseMultipleTimes(normalized: string): string[] | null {
+  // Looks for patterns like "una a las 14, otra a las 16, ... y la ultima a las 21"
+  // or simply "14, 16, 18 y 21" when in a list context (with "y" + numbers separated by commas)
+  const cleaned = normalized.replace(/\s+/g, " ").trim();
+
+  // Variant 1: explicit "una/otra a las X" chain
+  const enumeratedMatches = [...cleaned.matchAll(
+    /\b(?:una|otra|la\s+(?:ultima|primera|segunda|tercera|cuarta))\s+a\s+(?:las\s+)?(\d{1,2})(?::(\d{2}))?\s*(?:hs|horas?)?/g,
+  )];
+
+  if (enumeratedMatches.length >= 2) {
+    const times = enumeratedMatches.map((m) => formatHourMinute(m[1], m[2]));
+    return dedupeTimes(times);
+  }
+
+  // Variant 2: explicit comma-separated time list with at least 2 commas or "y"
+  const inListContext = /\b(?:para\s+)?(?:las\s+)?(\d{1,2})(?::\d{2})?\s*(?:hs|horas?)?\s*[,;]/.test(cleaned);
+  if (inListContext) {
+    const allTimes = [...cleaned.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(?:hs|horas?)?\b/g)];
+    if (allTimes.length >= 2) {
+      const candidates = allTimes
+        .filter((m) => {
+          const hour = Number(m[1]);
+          return hour >= 0 && hour <= 23;
+        })
+        .map((m) => formatHourMinute(m[1], m[2]));
+      const dedup = dedupeTimes(candidates);
+      if (dedup.length >= 2) return dedup;
+    }
+  }
+
+  return null;
+}
+
+function formatHourMinute(hourStr: string, minStr?: string): string {
+  return `${hourStr.padStart(2, "0")}:${(minStr ?? "00").padStart(2, "0")}`;
+}
+
+function dedupeTimes(times: string[]): string[] {
+  return [...new Set(times)];
+}
+
 function parseTime(
   normalized: string,
   state?: AgentConversationState,
@@ -1472,10 +1541,67 @@ function parseSport(normalized: string): string | null {
   return null;
 }
 
-function parseCustomerName(message: string): string | null {
-  const match = message.match(/(?:a\s+nombre\s+de|nombre\s+de|soy)\s+([a-zA-ZáéíóúÁÉÍÓÚñÑ ]{2,40})/i);
-  if (!match) return null;
-  return titleCase(match[1].replace(/[.,!?].*$/, "").trim());
+function parseCustomerName(
+  message: string,
+  state?: AgentConversationState,
+): string | null {
+  const trimmed = message.trim();
+
+  // Pattern 1: explicit prefixes ("a nombre de X", "soy X", "mi nombre es X")
+  const explicit = trimmed.match(
+    /(?:a\s+nombre\s+de|nombre\s+de|nombre\s+es|me\s+llamo|soy)\s+([a-zA-ZáéíóúÁÉÍÓÚñÑ\s]{2,60})/i,
+  );
+  if (explicit) {
+    const cleaned = cleanNameCandidate(explicit[1]);
+    if (cleaned) return cleaned;
+  }
+
+  // Pattern 2: bare "de X" when the bot just asked for the name
+  const expectsName = state?.intent === "booking" &&
+    state.status === "collecting_data" &&
+    (state.missing?.includes("customer_name") || !state.collected.customer_name);
+
+  if (expectsName) {
+    const dePrefix = trimmed.match(/^(?:de|para|es\s+para|es)\s+([a-zA-ZáéíóúÁÉÍÓÚñÑ\s]{2,60})$/i);
+    if (dePrefix) {
+      const cleaned = cleanNameCandidate(dePrefix[1]);
+      if (cleaned) return cleaned;
+    }
+
+    // Pattern 3: lone name when only name is missing — accept short alpha-only messages
+    if (looksLikeBareName(trimmed)) {
+      return cleanNameCandidate(trimmed);
+    }
+  }
+
+  return null;
+}
+
+function looksLikeBareName(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 2 || trimmed.length > 60) return false;
+  // No digits, no operational/affirmation keywords
+  if (/\d/.test(trimmed)) return false;
+  const normalized = trimmed
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
+  if (/\b(reserv|agend|cancel|reprogram|cambi|mover|disponib|comprobante|transferi|sena|hola|si|no|ok|dale|gracias|chau|deport|cancha|padel|tenis)\b/.test(normalized)) {
+    return false;
+  }
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 5) return false;
+  // Each word must be mostly alpha
+  return words.every((word) => /^[a-zA-ZáéíóúÁÉÍÓÚñÑ'-]{2,}$/.test(word));
+}
+
+function cleanNameCandidate(raw: string): string | null {
+  const stripped = raw
+    .replace(/[.,!?].*$/, "")
+    .replace(/\b(porfa(?:vor)?|gracias|please)\b/gi, "")
+    .trim();
+  if (stripped.length < 2 || stripped.length > 60) return null;
+  return titleCase(stripped);
 }
 
 function parseCourtQuantity(normalized: string): number | null {
@@ -1573,6 +1699,150 @@ function renderMultiReservationReply(
     `📅 ${context.date} a las ${context.time} hs\n` +
     `👤 ${context.customerName}\n` +
     ids.map((id, index) => `• Cancha ${index + 1}: ID ${id}`).join("\n");
+}
+
+async function handleMultiTimeBooking(params: {
+  input: DeterministicRouterInput;
+  state: AgentConversationState;
+  parsed: ParsedMessage;
+  booking: ReturnType<typeof createAgentBookingServices>;
+  policy: Awaited<ReturnType<typeof getBotPolicy>>;
+  date: string | null;
+  sport: string;
+  customerName: string | null;
+  multiTimes: string[];
+}): Promise<DeterministicRouterResult | null> {
+  const { input, state, parsed, booking, policy, date, sport, customerName, multiTimes } = params;
+
+  if (!date) {
+    await persistState(input, state, parsed, {
+      intent: "booking",
+      status: "collecting_data",
+      sport,
+      date: null,
+      time: multiTimes[0],
+      customerName,
+      missing: ["date"],
+    });
+    await saveAgentState(input.db, input.conversationId, {
+      collected: { multi_times: multiTimes },
+    });
+    return {
+      handled: true,
+      reply: `Tengo ${multiTimes.length} horarios (${multiTimes.join(", ")}). ¿Para qué día son?`,
+    };
+  }
+
+  if (!customerName) {
+    await persistState(input, state, parsed, {
+      intent: "booking",
+      status: "collecting_data",
+      sport,
+      date,
+      time: multiTimes[0],
+      customerName: null,
+      missing: ["customer_name"],
+    });
+    await saveAgentState(input.db, input.conversationId, {
+      collected: { multi_times: multiTimes },
+    });
+    return {
+      handled: true,
+      reply: `Tengo ${multiTimes.length} horarios (${multiTimes.join(", ")}) para ${date}. ¿A nombre de quién?`,
+    };
+  }
+
+  const status = policy.requires_deposit ? "pending" : "confirmed";
+  const results: Array<{ time: string; ok: boolean; id: string | null; reply: string }> = [];
+
+  for (const slotTime of multiTimes) {
+    const slotResolution = await resolveScheduleTime(input.db, input.tenantId, input.timezone, date, slotTime, sport);
+    if (!slotResolution.ok) {
+      results.push({ time: slotTime, ok: false, id: null, reply: slotResolution.reply });
+      continue;
+    }
+    const create = await booking.reservations.createReservation({
+      customer_name: customerName,
+      sport_name: sport,
+      date,
+      time: slotResolution.time,
+      status,
+    });
+    results.push({
+      time: slotResolution.time,
+      ok: create.ok,
+      id: create.id ?? null,
+      reply: create.reply,
+    });
+  }
+
+  const successful = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+  const successIds = successful.map((r) => r.id).filter(Boolean) as string[];
+
+  const depositLine = policy.requires_deposit ? await renderDepositLine(input.tenantId, input.db) : "";
+  const okLines = successful.map((r) => `• ${r.time}`);
+  const failLines = failed.map((r) => `• ${r.time}: ${stripLeadingIcon(r.reply)}`);
+
+  const lines: string[] = [];
+  if (successful.length) {
+    const verb = status === "pending" ? "Reservas pendientes" : "Reservas confirmadas";
+    lines.push(`${verb} para ${date} a nombre de ${customerName}:`);
+    lines.push(...okLines);
+    if (depositLine) lines.push(depositLine);
+    if (status === "pending") lines.push("Cuando mandes el comprobante las marco como confirmadas.");
+  }
+  if (failed.length) {
+    lines.push(successful.length ? "\nNo pude reservar:" : "No pude reservar ningún horario:");
+    lines.push(...failLines);
+  }
+  const reply = lines.join("\n");
+
+  await persistState(input, state, parsed, {
+    intent: "booking",
+    status: failed.length === 0 && status === "confirmed" ? "done" : "collecting_data",
+    sport,
+    date,
+    time: successful[0]?.time ?? multiTimes[0],
+    customerName,
+    courtQuantity: successful.length || 1,
+    missing: status === "pending" && successful.length ? ["deposit"] : [],
+    pendingReservationIds: status === "pending" ? successIds : [],
+    pendingDepositReservationIds: status === "pending" ? successIds : [],
+    candidateReservationId: successIds[0] ?? null,
+    candidateReservationIds: successIds,
+    candidateReservations: reservationRefsFromIds(successIds, {
+      sport,
+      date,
+      time: successful[0]?.time ?? multiTimes[0],
+      status,
+    }),
+    lastCreatedReservationIds: successIds,
+    pendingConfirmation: status === "pending" && successIds.length
+      ? buildPendingConfirmation("confirm_deposit", successIds, {
+          date,
+          time: successful[0]?.time ?? multiTimes[0],
+          sport,
+          courtQuantity: successIds.length,
+        })
+      : null,
+  });
+  // Clear multi_times on success — they were materialized into reservations
+  await saveAgentState(input.db, input.conversationId, {
+    collected: { multi_times: null },
+  });
+  await logRouterEvent(input, "multi_time_booking_attempted", {
+    date,
+    sport,
+    requestedTimes: multiTimes,
+    successful: successful.map((r) => r.time),
+    failed: failed.map((r) => ({ time: r.time, reply: r.reply })),
+  });
+  return { handled: true, reply };
+}
+
+function stripLeadingIcon(reply: string): string {
+  return reply.replace(/^[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ]+/, "").trim();
 }
 
 function renderPendingDepositReply(context: {

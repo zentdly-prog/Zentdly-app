@@ -38,6 +38,7 @@ export interface AgentConversationState {
     sport?: string | null;
     date?: string | null;
     time?: string | null;
+    multi_times?: string[] | null;
     customer_name?: string | null;
     reservation_id?: string | null;
     court_quantity?: number | null;
