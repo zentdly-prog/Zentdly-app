@@ -146,11 +146,13 @@ export class AgentAvailabilityService {
     const dayStartDate = fromZonedTime(`${date}T00:00:00`, this.timezone);
     const dayStart = dayStartDate.toISOString();
     const dayEnd = new Date(dayStartDate.getTime() + 30 * 3600 * 1000).toISOString();
+    // Only confirmed reservations occupy the slot. Pending reservations
+    // (awaiting deposit) leave the slot bookable by other customers.
     const { data: reservations } = await this.db
       .from("reservations")
       .select("starts_at, ends_at, court_type_id, status")
       .eq("tenant_id", this.tenantId)
-      .in("status", ["confirmed", "pending"])
+      .eq("status", "confirmed")
       .gte("starts_at", dayStart)
       .lte("starts_at", dayEnd);
 
@@ -280,12 +282,14 @@ export class AgentAvailabilityService {
     endsAt: Date,
     excludeReservationId?: string | string[],
   ): Promise<{ id: string; notes: string | null }[]> {
+    // Conflict checks only look at confirmed reservations — pending bookings
+    // do not lock the slot. Multiple pendings can coexist at the same time.
     let query = this.db
       .from("reservations")
       .select("id, notes")
       .eq("tenant_id", this.tenantId)
       .eq("court_type_id", court.id)
-      .in("status", ["confirmed", "pending"])
+      .eq("status", "confirmed")
       .lt("starts_at", endsAt.toISOString())
       .gt("ends_at", startsAt.toISOString());
 
@@ -344,7 +348,44 @@ export class AgentReservationCommandService {
       return "No encontré una reserva pendiente a tu nombre para confirmar.";
     }
 
-    const ids = pending.map((reservation) => reservation.id);
+    // Re-validate each pending slot against current confirmed reservations.
+    // Since pending no longer blocks the slot, another customer may have
+    // confirmed the slot in the meantime — refuse with a clear message.
+    const confirmable: CustomerReservation[] = [];
+    const conflicts: CustomerReservation[] = [];
+    for (const reservation of pending) {
+      const court = relationOne(reservation.court_types);
+      if (!court) {
+        conflicts.push(reservation);
+        continue;
+      }
+      const startsAt = parseISO(reservation.starts_at);
+      const endsAt = parseISO(reservation.ends_at);
+      const overlapping = await this.availability.findOverlappingReservations(court, startsAt, endsAt, reservation.id);
+      const capacity = getCourtCapacity(court);
+      if (overlapping.length >= capacity) {
+        conflicts.push(reservation);
+        continue;
+      }
+      // Re-assign the court unit in case the originally-picked unit is now taken
+      // by a confirmed booking. assign() prefers the previously-assigned unit when free.
+      const reassigned = this.assignment.assign(court, overlapping);
+      const { error: updateError } = await this.context.db
+        .from("reservations")
+        .update({ notes: reassigned.name })
+        .eq("id", reservation.id);
+      if (updateError) {
+        conflicts.push(reservation);
+        continue;
+      }
+      confirmable.push(reservation);
+    }
+
+    if (!confirmable.length) {
+      return "Lamentablemente alguien tomó ese horario antes de que mandaras la seña. ¿Querés que vea otro horario?";
+    }
+
+    const ids = confirmable.map((reservation) => reservation.id);
     const { data, error } = await this.context.db
       .from("reservations")
       .update({ status: "confirmed" })
@@ -366,14 +407,17 @@ export class AgentReservationCommandService {
       );
     }
 
-    const first = pending[0];
+    const first = confirmable[0];
     const sport = relationOne(first.court_types)?.sport_name ?? args.sport_name ?? "Cancha";
     const start = formatInTimeZone(parseISO(first.starts_at), this.context.timezone, "dd/MM HH:mm");
     const quantity = data.length;
+    const conflictNote = conflicts.length
+      ? `\n\n⚠️ No pude confirmar ${conflicts.length} reserva${conflicts.length !== 1 ? "s" : ""} porque alguien más ya tomó ese horario.`
+      : "";
 
     return `✅ Reserva confirmada con seña recibida.\n` +
       `• ${quantity} cancha${quantity !== 1 ? "s" : ""} de ${sport}\n` +
-      `• ${start} hs`;
+      `• ${start} hs${conflictNote}`;
   }
 
   async createReservation(args: Record<string, string>): Promise<{ ok: boolean; reply: string; id?: string; status?: ReservationStatus }> {

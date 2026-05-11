@@ -28,7 +28,47 @@ async function main() {
   await smokePendingReschedulesToNewSlot();
   await smokeQuantityNotMisreadAsTime();
   await smokeDocumentAsDepositProof();
+  await smokePendingDoesNotBlockSlot();
   console.log("booking smoke tests passed");
+}
+
+async function smokePendingDoesNotBlockSlot() {
+  // Court has capacity 4. If 4 pendings exist at the same slot from another
+  // customer, availability for THIS customer must still show the slot as free
+  // (4 canchas) because pending no longer locks the slot.
+  const db = createSmokeDb();
+  const date = futureDate(11);
+
+  // Seed 4 pendings at 14:00 from a different customer
+  for (let i = 0; i < 4; i++) {
+    const startsAt = fromZonedTime(`${date}T14:00:00`, TIMEZONE);
+    const endsAt = new Date(startsAt.getTime() + 90 * 60_000);
+    db.reservations.push({
+      id: `00000000-1111-4000-8000-00000000000${i + 1}`,
+      tenant_id: TENANT_ID,
+      customer_id: "other-customer",
+      court_type_id: "court-padel",
+      starts_at: startsAt.toISOString(),
+      ends_at: endsAt.toISOString(),
+      status: "pending",
+      source: "whatsapp",
+      external_event_id: null,
+      external_sheet_row_id: null,
+      notes: `Cancha ${i + 1}`,
+    });
+  }
+
+  const availability = await route(db, `Tenes cancha para ${date} a las 14:00?`);
+  // The slot should still be available because the 4 pendings don't block
+  assert.match(availability.reply ?? "", /A nombre de qui[eé]n/i,
+    `expected slot to be free (pendings should not block) — got: ${availability.reply}`);
+
+  // Now confirm one of the existing pendings (simulate the other customer paying)
+  db.reservations[0].status = "confirmed";
+  // Re-check availability — should now show 3 free (4 capacity - 1 confirmed)
+  const availability2 = await route(db, `Tenes cancha para ${date} a las 14:00?`);
+  assert.match(availability2.reply ?? "", /3\s*canchas?\s*disponibles?/i,
+    `expected 3 canchas disponibles — got: ${availability2.reply}`);
 }
 
 async function smokeQuantityNotMisreadAsTime() {
