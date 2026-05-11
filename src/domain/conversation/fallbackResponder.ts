@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { IntentExtractor } from "@/integrations/ai/intentExtractor";
 import { getBotPolicy } from "@/lib/actions/policies";
+import { computeDepositAmount, formatMoney } from "@/domain/booking/reservationRules";
 import {
   getAgentState,
   logAgentEvent,
@@ -143,14 +144,35 @@ async function renderPolicyTopic(
       const courts = await fetchCourtPrices(input.db, input.tenantId);
       if (!courts.length) return "Por ahora no tengo precios cargados, te confirmo en cuanto pueda.";
       const lines = courts.map((c) =>
-        c.price != null ? `• ${c.sport_name}: $${c.price}` : `• ${c.sport_name}: precio a consultar`,
+        c.price != null ? `• ${c.sport_name}: ${formatMoney(c.price)}` : `• ${c.sport_name}: precio a consultar`,
       );
       return `Precios por turno:\n${lines.join("\n")}`;
     }
     case "deposit": {
       if (!policy.requires_deposit) return "Por ahora no pedimos seña para reservar.";
-      if (policy.deposit_amount != null) return `La seña para reservar es de $${policy.deposit_amount}.`;
-      if (policy.deposit_percentage != null) return `La seña para reservar es del ${policy.deposit_percentage}% del turno.`;
+
+      // Fixed amount
+      if (policy.deposit_amount != null) return `La seña para reservar es de ${formatMoney(policy.deposit_amount)}.`;
+
+      // Percentage: compute the actual peso amount per sport
+      if (policy.deposit_percentage != null) {
+        const courts = await fetchCourtPrices(input.db, input.tenantId);
+        const withPrice = courts.filter((c) => c.price != null);
+        if (withPrice.length === 1) {
+          const amount = computeDepositAmount(policy, withPrice[0].price);
+          return amount != null
+            ? `La seña para reservar es de ${formatMoney(amount)} (${policy.deposit_percentage}% del turno).`
+            : `La seña es del ${policy.deposit_percentage}% del turno.`;
+        }
+        if (withPrice.length > 1) {
+          const lines = withPrice.map((c) => {
+            const amount = computeDepositAmount(policy, c.price);
+            return `• ${c.sport_name}: ${amount != null ? formatMoney(amount) : "consultar"}`;
+          });
+          return `La seña es del ${policy.deposit_percentage}% del turno:\n${lines.join("\n")}`;
+        }
+        return `La seña es del ${policy.deposit_percentage}% del turno.`;
+      }
       return "Para reservar se requiere seña; el monto te lo confirmamos en el momento.";
     }
     case "hours": {

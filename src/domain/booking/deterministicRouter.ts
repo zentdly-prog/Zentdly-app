@@ -10,6 +10,7 @@ import {
 import { IntentExtractor } from "@/integrations/ai/intentExtractor";
 import type { NormalizedIntent } from "@/integrations/ai/schemas";
 import { getBotPolicy } from "@/lib/actions/policies";
+import { computeDepositAmount, formatMoney } from "@/domain/booking/reservationRules";
 import {
   getAgentState,
   logAgentEvent,
@@ -632,7 +633,7 @@ export async function handleDeterministicBookingMessage(
     }
 
     if (!customerName) {
-      const depositLine = await renderDepositLine(input.tenantId, input.db);
+      const depositLine = await renderDepositLine(input.tenantId, input.db, sport);
       await persistState(input, state, parsed, {
         intent: "booking",
         status: "collecting_data",
@@ -650,7 +651,7 @@ export async function handleDeterministicBookingMessage(
     }
 
     if (policy.requires_deposit && !parsed.hasDepositProof && pendingReservationIds.length > 0) {
-      const depositLine = await renderDepositLine(input.tenantId, input.db);
+      const depositLine = await renderDepositLine(input.tenantId, input.db, sport);
       const pendingMatch = pendingReservationMatchesSlot(state, date, slotResolution.time);
 
       // If the existing pending is at a DIFFERENT slot, reschedule it to the new one
@@ -722,7 +723,7 @@ export async function handleDeterministicBookingMessage(
     }
 
     if (policy.requires_deposit && !parsed.hasDepositProof) {
-      const depositLine = await renderDepositLine(input.tenantId, input.db);
+      const depositLine = await renderDepositLine(input.tenantId, input.db, sport);
       const created = [];
       for (let index = 0; index < courtQuantity; index++) {
         const createResult = await booking.reservations.createReservation({
@@ -1006,13 +1007,41 @@ function normalizedIntentToParsedMessage(
   };
 }
 
-async function renderDepositLine(tenantId: string, db?: SupabaseClient): Promise<string> {
+async function renderDepositLine(
+  tenantId: string,
+  db?: SupabaseClient,
+  sportName?: string | null,
+): Promise<string> {
   const policy = await getBotPolicy(tenantId, db);
   if (!policy.requires_deposit) return "";
 
-  if (policy.deposit_amount != null) return `Seña: $${policy.deposit_amount}.`;
+  const courtPrice = sportName && db ? await fetchCourtPriceForSport(db, tenantId, sportName) : null;
+  const amount = computeDepositAmount(policy, courtPrice);
+
+  if (amount != null) {
+    if (policy.deposit_percentage != null && policy.deposit_amount == null) {
+      return `Seña: ${formatMoney(amount)} (${policy.deposit_percentage}% del turno).`;
+    }
+    return `Seña: ${formatMoney(amount)}.`;
+  }
   if (policy.deposit_percentage != null) return `Seña: ${policy.deposit_percentage}% del turno.`;
   return "La reserva requiere seña.";
+}
+
+async function fetchCourtPriceForSport(
+  db: SupabaseClient,
+  tenantId: string,
+  sportName: string,
+): Promise<number | null> {
+  const { data } = await db
+    .from("court_types")
+    .select("price_per_slot")
+    .eq("tenant_id", tenantId)
+    .ilike("sport_name", `%${sportName}%`)
+    .eq("active", true)
+    .limit(1)
+    .maybeSingle();
+  return (data?.price_per_slot as number | null) ?? null;
 }
 
 export function parseBookingMessage(
@@ -1867,7 +1896,7 @@ async function handleMultiTimeBooking(params: {
   const failed = results.filter((r) => !r.ok);
   const successIds = successful.map((r) => r.id).filter(Boolean) as string[];
 
-  const depositLine = policy.requires_deposit ? await renderDepositLine(input.tenantId, input.db) : "";
+  const depositLine = policy.requires_deposit ? await renderDepositLine(input.tenantId, input.db, sport) : "";
   const okLines = successful.map((r) => `• ${r.time}`);
   const failLines = failed.map((r) => `• ${r.time}: ${stripLeadingIcon(r.reply)}`);
 
