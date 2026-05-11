@@ -66,7 +66,7 @@ export async function handleDeterministicBookingMessage(
   // get a complete answer.
 
   const parsed = normalizedIntent
-    ? normalizedIntentToParsedMessage(normalizedIntent, rawState, input.message)
+    ? normalizedIntentToParsedMessage(normalizedIntent, rawState, input.message, input.timezone)
     : parseBookingMessage(input.message, input.timezone, rawState);
   if (parsed.intent === "availability" && !messageHasExplicitTime(input.message)) {
     parsed.time = null;
@@ -933,6 +933,7 @@ function normalizedIntentToParsedMessage(
   normalized: NormalizedIntent,
   state: AgentConversationState,
   rawMessage: string,
+  timezone: string,
 ): ParsedMessage {
   const fallbackIntent: AgentIntent =
     normalized.intent === "booking" || normalized.intent === "deposit_confirmation" ? "booking" :
@@ -947,13 +948,48 @@ function normalizedIntentToParsedMessage(
   const rawNormalized = normalizeText(rawMessage);
   const multiTimes = fallbackIntent === "booking" ? parseMultipleTimes(rawNormalized) : null;
 
+  // Defensive: if the message has explicit date markers ("hoy", "mañana", "el N"),
+  // trust the regex parser over the LLM. The LLM tends to keep state.collected.date
+  // even when the user is correcting it.
+  let resolvedDate = normalized.date;
+  const hasExplicitDateMarker = /\b(hoy|manana|pasado\s+manana|el\s+\d{1,2}(?:\s+de\s+\w+)?)\b/.test(rawNormalized);
+  if (hasExplicitDateMarker) {
+    const regexDate = parseDate(rawNormalized, timezone, new Date(), state.collected.date ?? null);
+    if (regexDate && regexDate !== resolvedDate) {
+      resolvedDate = regexDate;
+    }
+  }
+
   // Resolve LLM-flagged ambiguity using explicit markers or prior offered slots
   let resolvedTime = normalized.time;
   let resolvedAmbiguous = normalized.time_ambiguous;
-  if (normalized.time_ambiguous && normalized.time_options.length >= 2 && !multiTimes) {
+  const meridiemHint = detectMeridiem(rawNormalized);
+
+  // Defensive override: the LLM sometimes returns a non-ambiguous HH:00 for input
+  // like "a las 8" when the raw message has no AM/PM/morning/evening marker.
+  // Force ambiguity back on so the bot asks for clarification.
+  if (
+    !multiTimes &&
+    !resolvedAmbiguous &&
+    resolvedTime &&
+    isBareAmbiguousHour(resolvedTime, rawNormalized) &&
+    meridiemHint === null
+  ) {
+    const hour = Number(resolvedTime.slice(0, 2));
+    resolvedAmbiguous = true;
+    resolvedTime = null;
+    if (!normalized.time_options.length) {
+      // Synthesize options so the disambiguation prompt fires
+      normalized.time_options = [
+        `${hour.toString().padStart(2, "0")}:00`,
+        `${(hour + 12).toString().padStart(2, "0")}:00`,
+      ];
+    }
+  }
+
+  if (resolvedAmbiguous && normalized.time_options.length >= 2 && !multiTimes) {
     const morning = normalized.time_options[0];
     const evening = normalized.time_options[1];
-    const meridiemHint = detectMeridiem(rawNormalized);
     if (meridiemHint === "morning") {
       resolvedTime = morning;
       resolvedAmbiguous = false;
@@ -988,7 +1024,7 @@ function normalizedIntentToParsedMessage(
 
   return {
     intent: fallbackIntent,
-    date: normalized.date,
+    date: resolvedDate,
     time: multiTimes ? multiTimes[0] : resolvedTime,
     multiTimes,
     sport: normalized.sport,
@@ -1573,6 +1609,19 @@ function parseDate(normalized: string, timezone: string, now: Date, priorDate: s
   const candidate = setDate(base, day);
   const resolved = candidate < addDays(localNow, -1) ? addMonths(candidate, 1) : candidate;
   return formatInTimeZone(resolved, timezone, "yyyy-MM-dd");
+}
+
+function isBareAmbiguousHour(time: string, rawNormalized: string): boolean {
+  // True when the time is HH:00 with HH in [1..11] AND the original message has no
+  // 2-digit hour like "08:00", no explicit "0X" leading zero, and no minutes suffix.
+  if (!/^\d{2}:00$/.test(time)) return false;
+  const hour = Number(time.slice(0, 2));
+  if (hour < 1 || hour > 11) return false;
+  // If the raw message contains the explicit zero-padded form (e.g. "08:00"), treat as unambiguous.
+  if (new RegExp(`\\b0${hour}(?::\\d{2})?\\b`).test(rawNormalized)) return false;
+  // If the raw message has the form "HH:MM" where MM != 00, also unambiguous (precise time).
+  if (new RegExp(`\\b${hour}:[0-5]\\d\\b`).test(rawNormalized)) return false;
+  return true;
 }
 
 function detectMeridiem(normalized: string): "morning" | "evening" | null {

@@ -29,7 +29,21 @@ async function main() {
   await smokeQuantityNotMisreadAsTime();
   await smokeDocumentAsDepositProof();
   await smokePendingDoesNotBlockSlot();
+  await smokeBareHourTreatedAmbiguous();
   console.log("booking smoke tests passed");
+}
+
+async function smokeBareHourTreatedAmbiguous() {
+  // "a las 8" with no AM/PM marker must be treated as ambiguous,
+  // even when the LLM (absent in smoke tests) is not available.
+  const db = createSmokeDb();
+  const date = futureDate(12);
+
+  const first = await route(db, `Quiero reservar para ${date} a las 8`);
+  assert.equal(first.handled, true);
+  assert.match(first.reply ?? "", /08:00 o a las 20:00/, JSON.stringify(first));
+  // Must NOT have created any reservation yet
+  assert.equal(db.reservations.length, 0, "no reservation should exist before AM/PM is clarified");
 }
 
 async function smokePendingDoesNotBlockSlot() {
