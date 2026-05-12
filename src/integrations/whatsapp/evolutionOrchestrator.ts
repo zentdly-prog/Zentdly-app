@@ -1,9 +1,9 @@
 import { createServerClient } from "@/infrastructure/supabase/server";
 import { evolutionSendText } from "./evolutionSender";
 import { getBotPolicy } from "@/lib/actions/policies";
-import { isForgetCommand, logAgentEvent, resetConversationState, saveAgentState } from "@/domain/conversation/agentOps";
-import { handleDeterministicBookingMessage } from "@/domain/booking/deterministicRouter";
-import { renderFallbackReply } from "@/domain/conversation/fallbackResponder";
+import { isForgetCommand, logAgentEvent, resetConversationState } from "@/domain/conversation/agentOps";
+import { runAgent } from "@/integrations/ai/agent";
+import { buildAgentContext } from "@/integrations/ai/contextBuilder";
 
 export interface EvolutionIncomingMessage {
   instanceName: string;
@@ -182,11 +182,6 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
       content: policy.audio_message,
       raw_payload: { auto: true, reason: "audio_message" },
     });
-    await saveAgentState(db, conversation.id, {
-      intent: "unknown",
-      status: "idle",
-      missing: [],
-    });
     await logAgentEvent(db, {
       tenantId,
       conversationId: conversation.id,
@@ -197,63 +192,56 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
     return;
   }
 
-  const deterministic = await handleDeterministicBookingMessage({
-    db,
-    tenantId,
-    customerId: customer.id,
-    customerPhone: `+${msg.from}`,
-    timezone,
-    conversationId: conversation.id,
-    message: msg.text,
-  });
+  // ── 7. LLM agent with tools ─────────────────────────────────────────────────
+  const context = await buildAgentContext(db, tenantId, conversation.id, customer.id, timezone);
+  // The inbound was just inserted; chatHistory already includes it as the trailing user message.
+  // Strip it so we can pass it as the "fresh" userMessage to the agent.
+  const lastUser = context.chatHistory.at(-1);
+  const priorHistory = lastUser?.role === "user" && lastUser.content === msg.text
+    ? context.chatHistory.slice(0, -1)
+    : context.chatHistory;
 
-  if (deterministic.handled) {
-    const reply = deterministic.reply ?? "No pude procesar tu consulta.";
-    recordRecentOutbound(conversation.id, reply);
-    await evolutionSendText(msg.instanceName, msg.jid, reply);
-    await db.from("messages").insert({
-      conversation_id: conversation.id,
-      direction: "outbound",
-      content: reply,
-      raw_payload: { deterministic: true },
+  let reply: string;
+  try {
+    reply = await runAgent({
+      systemPrompt: context.systemPrompt,
+      chatHistory: priorHistory,
+      userMessage: msg.text,
+      deps: {
+        db,
+        tenantId,
+        customerId: customer.id,
+        customerPhone: `+${msg.from}`,
+        timezone,
+        conversationId: conversation.id,
+        calendarSync: {
+          sync: async () => undefined,
+          delete: async () => undefined,
+        },
+      },
     });
-    await db
-      .from("conversations")
-      .update({ last_message_at: new Date().toISOString() })
-      .eq("id", conversation.id);
+  } catch (error) {
+    console.error("[agent] runAgent error:", error);
+    reply = "Tuve un problema procesando tu mensaje. ¿Podés reintentar en un momento?";
     await logAgentEvent(db, {
       tenantId,
       conversationId: conversation.id,
       customerId: customer.id,
-      eventType: "deterministic_reply_sent",
-      payload: { reply },
+      eventType: "agent_error",
+      payload: {},
+      error: error instanceof Error ? error.message : "unknown",
     });
-    syncGoogleIfNeeded(db, tenantId).catch((e) =>
-      console.error("[agent] Google sync error:", e)
-    );
-    return;
   }
 
-  // ── 7. Deterministic fallback (no AI hallucinations) ────────────────────────
-  const reply = await renderFallbackReply({
-    db,
-    tenantId,
-    customerId: customer.id,
-    conversationId: conversation.id,
-    timezone,
-    message: msg.text,
-  });
-
-  // ── 8. Send reply via Evolution ─────────────────────────────────────────────
+  // ── 8. Send + save ───────────────────────────────────────────────────────────
   recordRecentOutbound(conversation.id, reply);
   await evolutionSendText(msg.instanceName, msg.jid, reply);
 
-  // ── 9. Save outbound message ────────────────────────────────────────────────
   await db.from("messages").insert({
     conversation_id: conversation.id,
     direction: "outbound",
     content: reply,
-    raw_payload: {},
+    raw_payload: { agent: true },
   });
 
   await db
@@ -261,18 +249,15 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
     .update({ last_message_at: new Date().toISOString() })
     .eq("id", conversation.id);
 
-  await saveAgentState(db, conversation.id, {
-    status: "done",
-  });
   await logAgentEvent(db, {
     tenantId,
     conversationId: conversation.id,
     customerId: customer.id,
-    eventType: "reply_sent",
+    eventType: "agent_reply_sent",
     payload: { reply },
   });
 
-  // ── 10. Google sync safety pass (fire & forget) ─────────────────────────────
+  // ── 9. Google sync safety pass (fire & forget) ──────────────────────────────
   syncGoogleIfNeeded(db, tenantId).catch((e) =>
     console.error("[agent] Google sync error:", e)
   );

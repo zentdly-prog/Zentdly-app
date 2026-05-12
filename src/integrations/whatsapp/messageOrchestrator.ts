@@ -2,9 +2,9 @@ import { createServerClient } from "@/infrastructure/supabase/server";
 import { WhatsAppSender } from "./sender";
 import { ConversationHandler } from "@/domain/conversation/conversationHandler";
 import { CustomerRepository } from "@/infrastructure/repositories/customerRepository";
-import { isForgetCommand, logAgentEvent, resetConversationState, saveAgentState } from "@/domain/conversation/agentOps";
-import { handleDeterministicBookingMessage } from "@/domain/booking/deterministicRouter";
-import { renderFallbackReply } from "@/domain/conversation/fallbackResponder";
+import { isForgetCommand, logAgentEvent, resetConversationState } from "@/domain/conversation/agentOps";
+import { runAgent } from "@/integrations/ai/agent";
+import { buildAgentContext } from "@/integrations/ai/contextBuilder";
 import type { WhatsAppIncomingMessage } from "./types";
 
 export async function handleIncomingMessage(
@@ -82,47 +82,52 @@ export async function handleIncomingMessage(
     return;
   }
 
-  const deterministic = await handleDeterministicBookingMessage({
-    db,
-    tenantId,
-    customerId: customer.id,
-    customerPhone: `+${msg.from}`,
-    timezone,
-    conversationId: conversation.id,
-    message: msg.text,
-  });
+  // LLM agent with tools
+  const context = await buildAgentContext(db, tenantId, conversation.id, customer.id, timezone);
+  const lastUser = context.chatHistory.at(-1);
+  const priorHistory = lastUser?.role === "user" && lastUser.content === msg.text
+    ? context.chatHistory.slice(0, -1)
+    : context.chatHistory;
 
-  if (deterministic.handled) {
-    const replyText = deterministic.reply ?? "No pude procesar tu consulta.";
-    await sender.sendText(msg.from, replyText);
-    await conversationHandler.saveMessage(conversation.id, "outbound", replyText, { deterministic: true });
+  let replyText: string;
+  try {
+    replyText = await runAgent({
+      systemPrompt: context.systemPrompt,
+      chatHistory: priorHistory,
+      userMessage: msg.text,
+      deps: {
+        db,
+        tenantId,
+        customerId: customer.id,
+        customerPhone: `+${msg.from}`,
+        timezone,
+        conversationId: conversation.id,
+        calendarSync: {
+          sync: async () => undefined,
+          delete: async () => undefined,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("[agent] runAgent error (meta):", error);
+    replyText = "Tuve un problema procesando tu mensaje. ¿Podés reintentar en un momento?";
     await logAgentEvent(db, {
       tenantId,
       conversationId: conversation.id,
       customerId: customer.id,
-      eventType: "deterministic_reply_sent",
-      payload: { provider: "meta", reply: replyText },
+      eventType: "agent_error",
+      payload: { provider: "meta" },
+      error: error instanceof Error ? error.message : "unknown",
     });
-    return;
   }
 
-  const replyText = await renderFallbackReply({
-    db,
-    tenantId,
-    customerId: customer.id,
-    conversationId: conversation.id,
-    timezone,
-    message: msg.text,
-  });
-
   await sender.sendText(msg.from, replyText);
-  await conversationHandler.saveMessage(conversation.id, "outbound", replyText);
-  await saveAgentState(db, conversation.id, { status: "done" });
+  await conversationHandler.saveMessage(conversation.id, "outbound", replyText, { agent: true });
   await logAgentEvent(db, {
     tenantId,
     conversationId: conversation.id,
     customerId: customer.id,
-    eventType: "reply_sent",
+    eventType: "agent_reply_sent",
     payload: { provider: "meta", reply: replyText },
   });
 }

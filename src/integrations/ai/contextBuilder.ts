@@ -1,85 +1,156 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { formatInTimeZone, fromZonedTime, toZonedTime } from "date-fns-tz";
-import { addDays, parseISO } from "date-fns";
-import {
-  describeCourtUnit,
-  getActiveCourtUnits,
-  getCourtCapacity,
-  type CourtUnit,
-} from "@/domain/courts/courtUnits";
+import { formatInTimeZone, toZonedTime } from "date-fns-tz";
+import { parseISO } from "date-fns";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 const DAYS_ES = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
-const MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+const MONTHS_ES = [
+  "enero", "febrero", "marzo", "abril", "mayo", "junio",
+  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+];
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface TenantContext {
-  tenantId: string;
-  tenantName: string;
-  timezone: string;
-  botPrompt: string;
+export interface BuiltContext {
+  systemPrompt: string;
+  chatHistory: ChatCompletionMessageParam[];
 }
-
-interface CourtType {
-  id: string;
-  sport_name: string;
-  description: string | null;
-  slot_duration_minutes: number;
-  open_time: string;
-  close_time: string;
-  quantity: number;
-  price_per_slot: number | null;
-  days_of_week: number[];
-  court_units: CourtUnit[] | null;
-}
-
-interface ExistingReservation {
-  id?: string;
-  starts_at: string;
-  ends_at: string;
-  court_type_id: string;
-  status: string;
-  notes?: string | null;
-  customers?: { name: string | null; phone_e164: string | null } | { name: string | null; phone_e164: string | null }[] | null;
-  court_types?: { sport_name: string | null } | { sport_name: string | null }[] | null;
-}
-
-interface CustomerProfile {
-  name: string | null;
-  phone_e164: string;
-  notes: string | null;
-}
-
-// ─── Main export ──────────────────────────────────────────────────────────────
 
 export async function buildAgentContext(
   db: SupabaseClient,
   tenantId: string,
   conversationId: string,
-  customerId: string
-): Promise<{ systemPrompt: string; chatHistory: { role: "user" | "assistant"; content: string }[] }> {
-  const tenant = await fetchTenant(db, tenantId);
-  const tz = tenant?.timezone ?? "America/Argentina/Buenos_Aires";
-
-  const [courts, upcomingReservations, customerReservations, customer, history, policy] = await Promise.all([
-    fetchCourts(db, tenantId),
-    fetchUpcomingReservations(db, tenantId, tz, 14),
-    fetchCustomerReservations(db, tenantId, customerId),
+  customerId: string,
+  timezone: string,
+): Promise<BuiltContext> {
+  const [tenant, customer, history, policy, courts, customerReservations] = await Promise.all([
+    fetchTenant(db, tenantId),
     fetchCustomer(db, customerId),
-    fetchRecentHistory(db, conversationId),
+    fetchHistory(db, conversationId),
     fetchBotPolicy(db, tenantId),
+    fetchCourts(db, tenantId),
+    fetchCustomerReservations(db, tenantId, customerId, timezone),
   ]);
 
   const now = new Date();
-  const todayDow = toZonedTime(now, tz).getDay(); // 0=Sun 6=Sat in tenant tz
+  const nowLocal = toZonedTime(now, timezone);
+  const dayName = DAYS_ES[nowLocal.getDay()];
+  const monthName = MONTHS_ES[nowLocal.getMonth()];
+  const today = formatInTimeZone(now, timezone, "yyyy-MM-dd");
+  const nowTime = formatInTimeZone(now, timezone, "HH:mm");
+  const dateLine = `Hoy es ${dayName} ${nowLocal.getDate()} de ${monthName} de ${nowLocal.getFullYear()}, son las ${nowTime} hs. Fecha ISO: ${today}. Zona horaria: ${timezone}.`;
 
-  const courtsInfo = buildCourtsSection(courts, todayDow);
-  const calendarInfo = buildCalendarSection(upcomingReservations, tz);
-  const customerInfo = buildCustomerSection(customer, customerReservations, tz);
-  const policyInfo = buildPolicySection(policy);
-  const systemPrompt = buildSystemPrompt(tenant, courtsInfo, calendarInfo, customerInfo, policyInfo, now, tz);
+  const businessName = tenant?.name?.trim() || "el complejo";
+  const businessAddress = tenant?.address?.trim() || null;
+  const customPrompt = tenant?.bot_prompt?.trim() || null;
+
+  const customerLine =
+    customer?.name?.trim()
+      ? `Cliente actual: ${customer.name.trim()} · Teléfono: ${customer.phone_e164 ?? "—"}`
+      : `Cliente actual: nombre no informado · Teléfono: ${customer?.phone_e164 ?? "—"}`;
+
+  const courtsBlock = courts.length
+    ? courts.map((c) => {
+        const price = c.price_per_slot != null ? `$${c.price_per_slot}` : "consultar";
+        const days = c.days_of_week
+          .slice()
+          .sort()
+          .map((d: number) => DAYS_ES[d])
+          .join(", ");
+        return `- ${c.sport_name}: ${c.open_time.slice(0, 5)} a ${c.close_time.slice(0, 5)} (${c.slot_duration_minutes} min/turno) · ${price} · días: ${days} · ${c.quantity} cancha${c.quantity !== 1 ? "s" : ""}`;
+      }).join("\n")
+    : "(sin canchas configuradas)";
+
+  const policyBlock = [
+    `- Requiere seña: ${policy.requires_deposit ? "sí" : "no"}`,
+    policy.deposit_amount != null ? `- Seña fija: $${policy.deposit_amount}` : null,
+    policy.deposit_percentage != null ? `- Seña %: ${policy.deposit_percentage}% del turno` : null,
+    `- Estado inicial de reserva: ${policy.reservation_status_default}`,
+    `- Horas mínimas para cancelar: ${policy.cancellation_min_hours ?? 0}`,
+    `- Horas mínimas para reprogramar: ${policy.reschedule_min_hours ?? 0}`,
+    policy.audio_message ? `- Mensaje al recibir audios: "${policy.audio_message}"` : null,
+  ].filter(Boolean).join("\n");
+
+  const reservationsBlock = customerReservations.length
+    ? customerReservations.join("\n")
+    : "(el cliente no tiene reservas activas)";
+
+  const systemPrompt = `Sos el asistente de WhatsApp de *${businessName}*, un complejo de canchas deportivas en Argentina.
+
+${dateLine}
+${businessAddress ? `Dirección: ${businessAddress}` : ""}
+
+═══════════════════════════════
+QUIÉN ES ESTE CLIENTE
+═══════════════════════════════
+${customerLine}
+
+Reservas activas del cliente:
+${reservationsBlock}
+
+═══════════════════════════════
+CANCHAS Y SERVICIOS DEL NEGOCIO
+═══════════════════════════════
+${courtsBlock}
+
+═══════════════════════════════
+POLÍTICAS DEL NEGOCIO
+═══════════════════════════════
+${policyBlock}
+
+${customPrompt ? `═══════════════════════════════\nINSTRUCCIONES ADICIONALES DEL NEGOCIO\n═══════════════════════════════\n${customPrompt}\n\n` : ""}═══════════════════════════════
+CÓMO TRABAJAR
+═══════════════════════════════
+- Hablás en español rioplatense, natural y breve. Como un encargado humano, no como un robot.
+- Para CUALQUIER acción (reservar, cancelar, confirmar seña, reagendar, consultar disponibilidad, ver reservas del cliente) usás las TOOLS. Nunca afirmes que hiciste algo sin haber recibido un resultado positivo de la tool correspondiente.
+- Si te falta un dato para una tool (fecha, hora, nombre, etc.), preguntá. No inventes.
+- Si el cliente da un horario ambiguo entre AM y PM (ej. "a las 8", "las 10"), preguntá "¿8:00 o 20:00?" antes de reservar. Horarios ≥12 (ej. "15:30", "20") son SIEMPRE PM, no ambiguos.
+- Entendés números en español ("quinse treinta" = 15:30, "ocho y media" = 8:30, "veintiuna" = 21:00, "ocho de la noche" = 20:00, "ocho de la mañana" = 8:00).
+- Si el cliente corrige algo ("no, era a las 8", "el 11 no el 12"), actualizá el dato y, si ya existía una reserva pendiente, reagendala con reschedule_reservation.
+- Nunca reserves en el pasado. Si pide algo ya pasado, decile y ofrecé un horario futuro.
+- Si el cliente manda una imagen o documento (PDF) Y tiene reservas pendientes esperando seña, asumí que es el comprobante y ejecutá confirm_deposit. Si no tiene pendientes, preguntá qué quiere hacer.
+- Si el cliente quiere consultar precio/seña/horario/dirección, usá get_business_info con el topic correspondiente. No inventes valores.
+- Para listar reservas del cliente o identificar una para cancelar/mover, usá list_my_reservations.
+- Si una tool devuelve un error o mensaje de "no se pudo", pasale ese mensaje al cliente de forma clara y natural, no lo inventes.
+- Respondé en 1-3 líneas como máximo. Si tenés que listar opciones, usá bullets cortos.
+- Nunca prometas resultados a futuro ("voy a..."). Ejecutá la tool primero, después comunicá el resultado.
+- Si el cliente dice "olvidate" / "empezar de nuevo" / "borrar todo", asumí que se reseteó el contexto (el sistema ya lo hizo) y arrancá de cero.`;
 
   return { systemPrompt, chatHistory: history };
+}
+
+async function fetchTenant(db: SupabaseClient, tenantId: string) {
+  const { data } = await db
+    .from("tenants")
+    .select("name, address, bot_prompt")
+    .eq("id", tenantId)
+    .maybeSingle();
+  return data as { name: string; address: string | null; bot_prompt: string | null } | null;
+}
+
+async function fetchCustomer(db: SupabaseClient, customerId: string) {
+  const { data } = await db
+    .from("customers")
+    .select("name, phone_e164")
+    .eq("id", customerId)
+    .maybeSingle();
+  return data as { name: string | null; phone_e164: string | null } | null;
+}
+
+async function fetchHistory(
+  db: SupabaseClient,
+  conversationId: string,
+): Promise<ChatCompletionMessageParam[]> {
+  const { data } = await db
+    .from("messages")
+    .select("direction, content, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(30);
+
+  const ordered = (data ?? []).reverse();
+  return ordered.map((m) => ({
+    role: m.direction === "inbound" ? "user" : "assistant",
+    content: m.content as string,
+  })) as ChatCompletionMessageParam[];
 }
 
 async function fetchBotPolicy(db: SupabaseClient, tenantId: string) {
@@ -88,338 +159,65 @@ async function fetchBotPolicy(db: SupabaseClient, tenantId: string) {
     .select("cancellation_min_hours, reschedule_min_hours, requires_deposit, deposit_amount, deposit_percentage, reservation_status_default, audio_message, human_handoff_message")
     .eq("tenant_id", tenantId)
     .maybeSingle();
-
-  return data ?? {
+  return (data ?? {
     cancellation_min_hours: 0,
     reschedule_min_hours: 0,
     requires_deposit: false,
     deposit_amount: null,
     deposit_percentage: null,
     reservation_status_default: "confirmed",
-    audio_message: "No puedo escuchar audios por acá. Escribime el día, horario y deporte y te ayudo.",
-    human_handoff_message: "Te derivo con una persona del equipo para ayudarte con eso.",
+    audio_message: "No puedo escuchar audios.",
+    human_handoff_message: "Te derivo con una persona del equipo.",
+  }) as {
+    cancellation_min_hours: number;
+    reschedule_min_hours: number;
+    requires_deposit: boolean;
+    deposit_amount: number | null;
+    deposit_percentage: number | null;
+    reservation_status_default: string;
+    audio_message: string;
+    human_handoff_message: string;
   };
 }
 
-// ─── Tenant ───────────────────────────────────────────────────────────────────
-
-async function fetchTenant(db: SupabaseClient, tenantId: string) {
+async function fetchCourts(db: SupabaseClient, tenantId: string) {
   const { data } = await db
-    .from("tenants")
-    .select("name, timezone, bot_prompt, address")
-    .eq("id", tenantId)
-    .single();
-  return data;
-}
-
-async function fetchCustomer(db: SupabaseClient, customerId: string): Promise<CustomerProfile | null> {
-  const { data } = await db
-    .from("customers")
-    .select("name, phone_e164, notes")
-    .eq("id", customerId)
-    .single();
-  return (data ?? null) as CustomerProfile | null;
-}
-
-// ─── Courts ───────────────────────────────────────────────────────────────────
-
-async function fetchCourts(db: SupabaseClient, tenantId: string): Promise<CourtType[]> {
-  const { data, error } = await db
     .from("court_types")
-    .select("id, sport_name, description, slot_duration_minutes, open_time, close_time, quantity, price_per_slot, days_of_week, court_units")
+    .select("sport_name, open_time, close_time, slot_duration_minutes, quantity, price_per_slot, days_of_week")
     .eq("tenant_id", tenantId)
     .eq("active", true);
-
-  if (error?.code === "42703") {
-    const { data: fallbackData } = await db
-      .from("court_types")
-      .select("id, sport_name, slot_duration_minutes, open_time, close_time, quantity, price_per_slot, days_of_week")
-      .eq("tenant_id", tenantId)
-      .eq("active", true);
-
-    return ((fallbackData ?? []) as Omit<CourtType, "description" | "court_units">[]).map((court) => ({
-      ...court,
-      description: null,
-      court_units: null,
-    }));
-  }
-
-  return (data ?? []) as CourtType[];
-}
-
-// ─── Reservations / calendar ──────────────────────────────────────────────────
-
-async function fetchUpcomingReservations(
-  db: SupabaseClient,
-  tenantId: string,
-  tz: string,
-  days: number
-): Promise<ExistingReservation[]> {
-  const now = new Date();
-  const todayStr = formatInTimeZone(now, tz, "yyyy-MM-dd");
-  const todayStart = fromZonedTime(`${todayStr}T00:00:00`, tz).toISOString();
-  const rangeEnd = addDays(fromZonedTime(`${todayStr}T00:00:00`, tz), days).toISOString();
-
-  const { data } = await db
-    .from("reservations")
-    .select("id, starts_at, ends_at, court_type_id, status, notes, customers(name, phone_e164), court_types(sport_name)")
-    .eq("tenant_id", tenantId)
-    .in("status", ["confirmed", "pending"])
-    .gte("starts_at", todayStart)
-    .lt("starts_at", rangeEnd)
-    .order("starts_at", { ascending: true });
-  return (data ?? []) as ExistingReservation[];
+  return (data ?? []) as Array<{
+    sport_name: string;
+    open_time: string;
+    close_time: string;
+    slot_duration_minutes: number;
+    quantity: number;
+    price_per_slot: number | null;
+    days_of_week: number[];
+  }>;
 }
 
 async function fetchCustomerReservations(
   db: SupabaseClient,
   tenantId: string,
-  customerId: string
-): Promise<ExistingReservation[]> {
+  customerId: string,
+  timezone: string,
+): Promise<string[]> {
   const { data } = await db
     .from("reservations")
-    .select("id, starts_at, ends_at, court_type_id, status, notes, court_types(sport_name)")
+    .select("id, starts_at, status, notes, court_types(sport_name)")
     .eq("tenant_id", tenantId)
     .eq("customer_id", customerId)
     .in("status", ["confirmed", "pending"])
     .gte("starts_at", new Date().toISOString())
     .order("starts_at", { ascending: true })
-    .limit(10);
-  return (data ?? []) as ExistingReservation[];
-}
+    .limit(15);
 
-// ─── Conversation history ───────────────────────────────────────────────────
-
-async function fetchRecentHistory(
-  db: SupabaseClient,
-  conversationId: string
-): Promise<{ role: "user" | "assistant"; content: string }[]> {
-  const { data } = await db
-    .from("messages")
-    .select("direction, content")
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: false })
-    .limit(80);
-
-  return (data ?? []).reverse().map((m) => ({
-    role: m.direction === "inbound" ? ("user" as const) : ("assistant" as const),
-    content: m.content,
-  }));
-}
-
-// ─── Available slots builder ──────────────────────────────────────────────────
-
-function buildCourtsSection(
-  courts: CourtType[],
-  todayDow: number,
-): string {
-  if (courts.length === 0) return "No hay canchas configuradas aún.";
-
-  const lines: string[] = [];
-
-  for (const court of courts) {
-    const worksToday = court.days_of_week.includes(todayDow);
-    const price = court.price_per_slot != null ? `$${court.price_per_slot}` : "precio a consultar";
-    const duration = `${court.slot_duration_minutes} min`;
-
-    const daysLabel = court.days_of_week
-      .sort()
-      .map((d) => DAYS_ES[d])
-      .join(", ");
-
-    lines.push(`\n### ${court.sport_name}`);
-    lines.push(`- Duración del turno: ${duration}`);
-    lines.push(`- Precio: ${price}`);
-    lines.push(`- Horario: ${court.open_time.slice(0, 5)} a ${court.close_time.slice(0, 5)}`);
-    lines.push(`- Días disponibles: ${daysLabel}`);
-    lines.push(`- Canchas simultáneas: ${getCourtCapacity(court)}`);
-
-    if (court.description?.trim()) {
-      lines.push(`- Descripción general: ${court.description.trim()}`);
-    }
-
-    lines.push("- Canchas físicas:");
-    for (const unit of getActiveCourtUnits(court)) {
-      lines.push(`  • ${describeCourtUnit(unit)}`);
-    }
-
-    if (!worksToday) {
-      lines.push(`- Hoy NO trabaja este deporte.`);
-      continue;
-    }
-
-    lines.push("- Para informar disponibilidad al cliente, consultar siempre la herramienta.");
-  }
-
-  return lines.join("\n");
-}
-
-function buildCustomerSection(
-  customer: CustomerProfile | null,
-  reservations: ExistingReservation[],
-  tz: string
-): string {
-  const name = customer?.name?.trim() || "todavía no informado";
-  const phone = customer?.phone_e164 ?? "sin teléfono";
-  const notes = customer?.notes?.trim() || "sin notas";
-
-  const lines = [
-    `- Nombre conocido: ${name}`,
-    `- Teléfono: ${phone}`,
-    `- Notas: ${notes}`,
-  ];
-
-  if (!reservations.length) {
-    lines.push("- Próximas reservas del cliente: ninguna.");
-    return lines.join("\n");
-  }
-
-  lines.push("- Próximas reservas del cliente:");
-  for (const r of reservations) {
-    const sport = relationOne(r.court_types)?.sport_name ?? "Cancha";
-    const start = formatInTimeZone(parseISO(r.starts_at), tz, "EEE dd/MM HH:mm");
-    const end = formatInTimeZone(parseISO(r.ends_at), tz, "HH:mm");
-    const courtLabel = r.notes ? ` · ${r.notes}` : "";
-    lines.push(`  • ${r.id?.slice(0, 8)} · ${sport}${courtLabel} · ${start}-${end} · ${r.status}`);
-  }
-
-  return lines.join("\n");
-}
-
-function buildCalendarSection(reservations: ExistingReservation[], tz: string): string {
-  if (!reservations.length) return "No hay reservas activas en los próximos 14 días.";
-
-  const grouped = new Map<string, ExistingReservation[]>();
-  for (const reservation of reservations) {
-    const day = formatInTimeZone(parseISO(reservation.starts_at), tz, "yyyy-MM-dd EEEE");
-    grouped.set(day, [...(grouped.get(day) ?? []), reservation]);
-  }
-
-  const lines: string[] = [];
-  for (const [day, dayReservations] of grouped) {
-    lines.push(`\n${day}`);
-    for (const reservation of dayReservations.slice(0, 20)) {
-      const customer = relationOne(reservation.customers);
-      const courtType = relationOne(reservation.court_types);
-      const start = formatInTimeZone(parseISO(reservation.starts_at), tz, "HH:mm");
-      const end = formatInTimeZone(parseISO(reservation.ends_at), tz, "HH:mm");
-      const sport = courtType?.sport_name ?? "Cancha";
-      const customerName = customer?.name || customer?.phone_e164 || "Cliente";
-      const courtLabel = reservation.notes ? ` · ${reservation.notes}` : "";
-      lines.push(`- ${start}-${end} · ${sport}${courtLabel} · ${customerName} · ${reservation.status}`);
-    }
-    if (dayReservations.length > 20) {
-      lines.push(`- ... ${dayReservations.length - 20} reservas más ese día.`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-function relationOne<T>(value: T | T[] | null | undefined): T | null {
-  if (!value) return null;
-  return Array.isArray(value) ? (value[0] ?? null) : value;
-}
-
-// ─── System prompt assembler ──────────────────────────────────────────────────
-
-function buildSystemPrompt(
-  tenant: { name: string; timezone: string; bot_prompt: string | null; address: string | null } | null,
-  courtsInfo: string,
-  calendarInfo: string,
-  customerInfo: string,
-  policyInfo: string,
-  now: Date,
-  tz: string
-): string {
-  const businessName = tenant?.name ?? "el negocio";
-  const address = tenant?.address ? `Dirección: ${tenant.address}` : "";
-  const customPrompt = tenant?.bot_prompt?.trim() ?? "";
-
-  const nowLocal = toZonedTime(now, tz);
-  const dow = nowLocal.getDay();
-  const dom = nowLocal.getDate();
-  const month = MONTHS_ES[nowLocal.getMonth()];
-  const year = nowLocal.getFullYear();
-  const timeStr = formatInTimeZone(now, tz, "HH:mm");
-  const dayStr = DAYS_ES[dow];
-
-  const dateBlock = `Hoy es ${dayStr} ${dom} de ${month} de ${year}, son las ${timeStr} hs (zona horaria: ${tz}).`;
-
-  return `Sos el asistente virtual de *${businessName}*, un complejo deportivo que gestiona reservas de canchas por WhatsApp.
-${address}
-
-${dateBlock}
-
-─────────────────────────────────────
-CLIENTE Y MEMORIA OPERATIVA
-─────────────────────────────────────
-${customerInfo}
-
-─────────────────────────────────────
-CANCHAS Y DISPONIBILIDAD RAPIDA
-─────────────────────────────────────
-${courtsInfo}
-
-─────────────────────────────────────
-CALENDARIO INTERNO - PROXIMOS 14 DIAS
-─────────────────────────────────────
-${calendarInfo}
-
-─────────────────────────────────────
-POLITICAS DEL NEGOCIO
-─────────────────────────────────────
-${policyInfo}
-
-─────────────────────────────────────
-INSTRUCCIONES DEL NEGOCIO
-─────────────────────────────────────
-${customPrompt || "Respondé en español rioplatense, de forma amigable y concisa. Ayudá al cliente a reservar o consultar turnos."}
-
-─────────────────────────────────────
-REGLAS GENERALES
-─────────────────────────────────────
-- La base de datos interna de Zentdly es la fuente de verdad del calendario. No inventes reservas, horarios ni precios.
-- Para disponibilidad, altas, cancelaciones o cambios usá las herramientas disponibles. No confirmes usando solo memoria textual.
-- Si este mensaje llega al fallback conversacional, no tenés permiso para ejecutar ni confirmar acciones. Nunca digas que algo quedó reservado, cancelado, reprogramado, confirmado o pagado salvo que el resultado venga explícitamente de una acción ejecutada por el motor determinístico.
-- Si el cliente pide reservar, cancelar, reprogramar o confirmar seña y no tenés un resultado operativo explícito, pedí el dato faltante o decí que necesitás verificarlo en el sistema.
-- Si el cliente pide "hoy", "mañana", "el viernes" o similares, resolvelo con la fecha local indicada arriba.
-- Para confirmar una reserva necesitás: deporte, fecha, horario y nombre del cliente. Si ya conocés el nombre por memoria, podés usarlo.
-- Antes de confirmar una reserva, verificá disponibilidad con la herramienta y luego creala con la herramienta.
-- Si el horario pedido ya está ocupado, ofrecé alternativas reales devueltas por la herramienta.
-- Las canchas físicas pueden tener características distintas: techo, césped sintético, acrílico o descripción propia. Usá esos datos cuando el cliente pida una cancha específica o pregunte diferencias.
-- Si hay varias canchas del mismo deporte pero con características distintas, tratá cada cancha física como una unidad reservable separada. No digas que son idénticas si la descripción indica diferencias.
-- Si el cliente quiere cancelar, solo podés cancelar reservas asociadas al número del cliente actual. Usá la herramienta con fecha y hora o con ID; si no existe una reserva activa de ese mismo número en ese horario, decí que no encontraste una reserva a su nombre y no canceles nada.
-- Si el cliente quiere cancelar pero no identificó claramente cuál, listá sus reservas activas antes de cancelar.
-- Si el cliente manda audio, no lo aceptes: pedile que escriba el mensaje.
-- Si hay ambigüedad de deporte, fecha u horario, preguntá solo el dato faltante.
-- Respondé siempre en español, de forma breve y directa. Máximo 3-4 líneas por mensaje.
-- No menciones detalles internos, IDs completos ni herramientas salvo que haga falta para diferenciar reservas.`.trim();
-}
-
-function buildPolicySection(policy: {
-  cancellation_min_hours?: number | null;
-  reschedule_min_hours?: number | null;
-  requires_deposit?: boolean | null;
-  deposit_amount?: number | null;
-  deposit_percentage?: number | null;
-  reservation_status_default?: string | null;
-  audio_message?: string | null;
-  human_handoff_message?: string | null;
-}): string {
-  const deposit = policy.requires_deposit
-    ? [
-        policy.deposit_amount != null ? `$${policy.deposit_amount}` : null,
-        policy.deposit_percentage != null ? `${policy.deposit_percentage}%` : null,
-      ].filter(Boolean).join(" o ") || "sí, monto a consultar"
-    : "no";
-
-  return [
-    `- Horas mínimas para cancelar: ${policy.cancellation_min_hours ?? 0}`,
-    `- Horas mínimas para reprogramar: ${policy.reschedule_min_hours ?? 0}`,
-    `- Requiere seña: ${deposit}`,
-    `- Estado inicial de reserva: ${policy.reservation_status_default ?? "confirmed"}`,
-    `- Mensaje ante audios: ${policy.audio_message ?? "Pedir que escriba el mensaje."}`,
-    `- Mensaje de derivación humana: ${policy.human_handoff_message ?? "Derivar a una persona del equipo."}`,
-  ].join("\n");
+  return (data ?? []).map((r) => {
+    const ct = r.court_types as { sport_name: string } | { sport_name: string }[] | null;
+    const sport = (Array.isArray(ct) ? ct[0]?.sport_name : ct?.sport_name) ?? "Cancha";
+    const when = formatInTimeZone(parseISO(r.starts_at as string), timezone, "EEE dd/MM HH:mm");
+    const notes = r.notes ? ` · ${r.notes}` : "";
+    return `- ${(r.id as string).slice(0, 8)} · ${sport}${notes} · ${when} · ${r.status}`;
+  });
 }
