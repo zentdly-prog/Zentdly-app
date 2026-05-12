@@ -26,6 +26,8 @@ const CourtTypeSchema = z.object({
     z.coerce.number().optional(),
   ),
   description: z.string().optional(),
+  equipment_rental: z.string().optional(),
+  rain_policy: z.string().optional(),
   days_of_week: z.string().optional(),
 });
 
@@ -61,19 +63,27 @@ export async function createCourtType(_prev: unknown, formData: FormData) {
   let db;
   try { db = createServerClient(); } catch { return { error: "Faltan variables de entorno de Supabase." }; }
 
-  const { error } = await db.from("court_types").insert({
+  const fullInsert = {
     ...payload.data.base,
     description: payload.data.description,
+    equipment_rental: payload.data.equipment_rental,
+    rain_policy: payload.data.rain_policy,
     court_units: payload.data.court_units,
-  });
+  };
 
-  if (error?.code === "42703" || error?.message.includes("court_units") || error?.message.includes("description")) {
-    const { error: fallbackError } = await db.from("court_types").insert(payload.data.base);
+  const { error } = await db.from("court_types").insert(fullInsert);
+
+  if (error?.code === "42703" || /court_units|description|equipment_rental|rain_policy/.test(error?.message ?? "")) {
+    // Retry without optional/extra columns that may not exist yet on this DB
+    const { error: fallbackError } = await db.from("court_types").insert({
+      ...payload.data.base,
+      description: payload.data.description,
+    });
     if (fallbackError) return { error: fallbackError.message };
     revalidatePath(`/tenants/${parsed.data.tenant_id}/courts`);
     return {
       ok: true,
-      warning: "La cancha se guardó sin detalles físicos porque falta aplicar la migración de court_units.",
+      warning: "La cancha se guardó sin algunos campos (faltan migraciones aplicadas).",
     };
   }
 
@@ -98,12 +108,14 @@ export async function updateCourtType(_prev: unknown, formData: FormData) {
     .update({
       ...payload.data.base,
       description: payload.data.description,
+      equipment_rental: payload.data.equipment_rental,
+      rain_policy: payload.data.rain_policy,
       court_units: payload.data.court_units,
     })
     .eq("id", parsed.data.id)
     .eq("tenant_id", parsed.data.tenant_id);
 
-  if (error?.code === "42703" || error?.message.includes("court_units") || error?.message.includes("description")) {
+  if (error?.code === "42703" || /court_units|description|equipment_rental|rain_policy/.test(error?.message ?? "")) {
     const { error: fallbackError } = await db
       .from("court_types")
       .update(payload.data.base)
@@ -146,6 +158,8 @@ function parseCourtTypePayload(input: CourtTypeInput, formData: FormData) {
         price_per_slot: input.price_per_slot ?? null,
       },
       description: input.description?.trim() || null,
+      equipment_rental: input.equipment_rental?.trim() || null,
+      rain_policy: input.rain_policy?.trim() || null,
       court_units: unitsParsed.data,
     },
   };

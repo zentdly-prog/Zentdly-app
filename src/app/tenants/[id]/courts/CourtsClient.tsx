@@ -36,6 +36,8 @@ type Court = {
   tenant_id: string;
   sport_name: string;
   description: string | null;
+  equipment_rental?: string | null;
+  rain_policy?: string | null;
   slot_duration_minutes: number;
   open_time: string;
   close_time: string;
@@ -295,6 +297,35 @@ export default function CourtsClient({
                 defaultValue={editingCourt?.description ?? ""}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500"
               />
+              <p className="mt-1 text-xs text-gray-400">El bot le pasa esto al cliente cuando pregunta detalles de la cancha.</p>
+            </div>
+
+            <div className="col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Alquiler de equipo
+              </label>
+              <textarea
+                name="equipment_rental"
+                rows={2}
+                placeholder={isPadel(sportName) ? "Ej: alquilamos paletas a $2.000 y pelotas a $1.000. Si no tenés, avisanos antes." : isFootball(sportName) ? "Ej: tenés que traer pelota, no se alquilan." : "Qué se puede alquilar y qué no en este deporte"}
+                defaultValue={editingCourt?.equipment_rental ?? ""}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <p className="mt-1 text-xs text-gray-400">¿Se pueden alquilar pelotas, paletas, raquetas? Si no, decílo claramente acá.</p>
+            </div>
+
+            <div className="col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Política de lluvia
+              </label>
+              <textarea
+                name="rain_policy"
+                rows={2}
+                placeholder="Ej: si llueve devolvemos la seña, o reprogramamos sin cargo dentro del mes."
+                defaultValue={editingCourt?.rain_policy ?? ""}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <p className="mt-1 text-xs text-gray-400">Qué pasa con la reserva si llueve. Cargá esto y el bot lo contesta solo.</p>
             </div>
 
             <div>

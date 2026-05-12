@@ -55,8 +55,16 @@ export async function buildAgentContext(
           .sort()
           .map((d: number) => DAYS_ES[d])
           .join(", ");
-        return `- ${c.sport_name}: ${c.open_time.slice(0, 5)} a ${c.close_time.slice(0, 5)} (${c.slot_duration_minutes} min/turno) · ${price} · días: ${days} · ${c.quantity} cancha${c.quantity !== 1 ? "s" : ""}`;
-      }).join("\n")
+        const lines = [
+          `### ${c.sport_name}`,
+          `Horario: ${c.open_time.slice(0, 5)} a ${c.close_time.slice(0, 5)} · ${c.slot_duration_minutes} min/turno · ${price} · ${c.quantity} cancha${c.quantity !== 1 ? "s" : ""}`,
+          `Días: ${days}`,
+        ];
+        if (c.description?.trim()) lines.push(`Descripción: ${c.description.trim()}`);
+        if (c.equipment_rental?.trim()) lines.push(`Alquiler de equipo: ${c.equipment_rental.trim()}`);
+        if (c.rain_policy?.trim()) lines.push(`Política de lluvia: ${c.rain_policy.trim()}`);
+        return lines.join("\n");
+      }).join("\n\n")
     : "(sin canchas configuradas)";
 
   const policyBlock = [
@@ -108,6 +116,7 @@ CÓMO TRABAJAR
 - Nunca reserves en el pasado. Si pide algo ya pasado, decile y ofrecé un horario futuro.
 - Si el cliente manda una imagen o documento (PDF) Y tiene reservas pendientes esperando seña, asumí que es el comprobante y ejecutá confirm_deposit. Si no tiene pendientes, preguntá qué quiere hacer.
 - Si el cliente quiere consultar precio/seña/horario/dirección/Instagram/web/dirección/maps, usá get_business_info con el topic correspondiente. No inventes valores.
+- Para preguntas sobre la cancha en sí (alquiler de pelotas/paletas/equipo, qué pasa si llueve, qué incluye el turno) leé la sección "CANCHAS Y SERVICIOS DEL NEGOCIO" de arriba. Cada deporte tiene su Descripción, Alquiler de equipo y Política de lluvia. Pasale al cliente literalmente lo que figura ahí. Si para ese deporte no hay info cargada en esos campos, decí que vas a consultar y no inventes.
 - CUANDO LE PIDAS LA SEÑA, llamá get_business_info con topic="payment_method" para conseguir el alias/CBU y el nombre del titular, y pasáselos al cliente en el mismo mensaje. Si el negocio no tiene alias cargado, decile que vas a pedir los datos al complejo.
 - Para listar reservas del cliente o identificar una para cancelar/mover, usá list_my_reservations.
 - Si una tool devuelve un error o mensaje de "no se pudo", pasale ese mensaje al cliente de forma clara y natural, no lo inventes.
@@ -182,21 +191,37 @@ async function fetchBotPolicy(db: SupabaseClient, tenantId: string) {
 }
 
 async function fetchCourts(db: SupabaseClient, tenantId: string) {
-  const { data } = await db
+  const { data, error } = await db
     .from("court_types")
-    .select("sport_name, open_time, close_time, slot_duration_minutes, quantity, price_per_slot, days_of_week")
+    .select("sport_name, open_time, close_time, slot_duration_minutes, quantity, price_per_slot, days_of_week, description, equipment_rental, rain_policy")
     .eq("tenant_id", tenantId)
     .eq("active", true);
-  return (data ?? []) as Array<{
-    sport_name: string;
-    open_time: string;
-    close_time: string;
-    slot_duration_minutes: number;
-    quantity: number;
-    price_per_slot: number | null;
-    days_of_week: number[];
-  }>;
+
+  // Fallback if equipment_rental / rain_policy columns don't exist yet
+  if (error?.code === "42703") {
+    const { data: fallback } = await db
+      .from("court_types")
+      .select("sport_name, open_time, close_time, slot_duration_minutes, quantity, price_per_slot, days_of_week, description")
+      .eq("tenant_id", tenantId)
+      .eq("active", true);
+    return (fallback ?? []).map((c) => ({ ...c, equipment_rental: null, rain_policy: null })) as Array<CourtRow>;
+  }
+
+  return (data ?? []) as Array<CourtRow>;
 }
+
+type CourtRow = {
+  sport_name: string;
+  open_time: string;
+  close_time: string;
+  slot_duration_minutes: number;
+  quantity: number;
+  price_per_slot: number | null;
+  days_of_week: number[];
+  description: string | null;
+  equipment_rental: string | null;
+  rain_policy: string | null;
+};
 
 async function fetchCustomerReservations(
   db: SupabaseClient,
