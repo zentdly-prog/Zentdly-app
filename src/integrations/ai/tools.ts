@@ -129,14 +129,14 @@ export const AGENT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "get_business_info",
       description:
-        "Información del negocio: precios, horarios de atención, deportes disponibles, dirección, política de seña, política de cancelación. Usalo cuando el cliente pregunta cualquier dato del comercio.",
+        "Información del negocio: precios, horarios, deportes, dirección, link de Maps, Instagram, web, email, datos de transferencia (alias y titular) para pagar la seña, política de seña, política de cancelación. Usalo cuando el cliente pregunta cualquier dato del comercio o cuando estás por pedir el comprobante de seña y necesitás dar el alias.",
       parameters: {
         type: "object",
         properties: {
           topic: {
             type: "string",
-            enum: ["price", "hours", "sports", "address", "deposit", "cancellation", "all"],
-            description: "Tema sobre el que quiere saber",
+            enum: ["price", "hours", "sports", "address", "deposit", "payment_method", "cancellation", "social", "all"],
+            description: "Tema sobre el que quiere saber. 'payment_method' devuelve alias/titular/banco para pasarle al cliente al pedir seña. 'social' devuelve Instagram/web/email.",
           },
         },
         required: ["topic"],
@@ -282,13 +282,45 @@ export async function executeTool(
 async function getBusinessInfo(deps: AgentToolDeps, topic: string): Promise<string> {
   const sections: string[] = [];
 
+  // Most topics need the tenant row anyway — fetch once.
+  const { data: tenant } = await deps.db
+    .from("tenants")
+    .select("name, address, maps_url, instagram, website, contact_email, bank_alias, bank_holder_name, bank_name")
+    .eq("id", deps.tenantId)
+    .single();
+  const t = tenant as {
+    name: string;
+    address: string | null;
+    maps_url: string | null;
+    instagram: string | null;
+    website: string | null;
+    contact_email: string | null;
+    bank_alias: string | null;
+    bank_holder_name: string | null;
+    bank_name: string | null;
+  } | null;
+
   if (topic === "all" || topic === "address") {
-    const { data: tenant } = await deps.db
-      .from("tenants")
-      .select("name, address")
-      .eq("id", deps.tenantId)
-      .single();
-    if (tenant?.address) sections.push(`Dirección: ${tenant.address}`);
+    if (t?.address) sections.push(`Dirección: ${t.address}`);
+    if (t?.maps_url) sections.push(`Mapa: ${t.maps_url}`);
+  }
+
+  if (topic === "all" || topic === "social") {
+    if (t?.instagram) sections.push(`Instagram: @${t.instagram.replace(/^@/, "")}`);
+    if (t?.website) sections.push(`Web: ${t.website}`);
+    if (t?.contact_email) sections.push(`Email: ${t.contact_email}`);
+  }
+
+  if (topic === "all" || topic === "payment_method") {
+    const bankBits: string[] = [];
+    if (t?.bank_alias) bankBits.push(`Alias / CBU: ${t.bank_alias}`);
+    if (t?.bank_holder_name) bankBits.push(`A nombre de: ${t.bank_holder_name}`);
+    if (t?.bank_name) bankBits.push(`Banco: ${t.bank_name}`);
+    if (bankBits.length) {
+      sections.push(`Datos de transferencia para la seña:\n${bankBits.join("\n")}`);
+    } else if (topic === "payment_method") {
+      sections.push("Todavía no tengo cargados los datos bancarios. Pedíselos al complejo.");
+    }
   }
 
   if (topic === "all" || topic === "sports" || topic === "price" || topic === "hours") {

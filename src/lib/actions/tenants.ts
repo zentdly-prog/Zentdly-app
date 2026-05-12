@@ -5,13 +5,25 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
+const optionalText = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+  z.string().optional().nullable(),
+);
+
 const TenantSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1).regex(/^[a-z0-9-]+$/),
   timezone: z.string().default("America/Argentina/Buenos_Aires"),
-  contact_name: z.string().optional(),
-  contact_phone: z.string().optional(),
-  address: z.string().optional(),
+  contact_name: optionalText,
+  contact_phone: optionalText,
+  contact_email: optionalText,
+  address: optionalText,
+  maps_url: optionalText,
+  instagram: optionalText,
+  website: optionalText,
+  bank_alias: optionalText,
+  bank_holder_name: optionalText,
+  bank_name: optionalText,
 });
 
 export async function createTenant(_prev: unknown, formData: FormData) {
