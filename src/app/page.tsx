@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { getTenants } from "@/lib/actions/tenants";
+import { getSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function TenantsPage() {
-  const tenants = await getTenants();
+  const [tenants, session] = await Promise.all([getTenants(), getSession()]);
+  const isAdmin = session.role === "admin";
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -16,12 +18,24 @@ export default async function TenantsPage() {
           <span className="text-lg font-semibold text-gray-900">Zentdly</span>
           <span className="text-sm text-gray-400">Panel interno</span>
         </div>
-        <Link
-          href="/tenants/new"
-          className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
-        >
-          + Nuevo negocio
-        </Link>
+        <div className="flex items-center gap-2">
+          {isAdmin && (
+            <Link href="/usuarios" className="px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900">
+              Usuarios
+            </Link>
+          )}
+          {isAdmin && (
+            <Link
+              href="/tenants/new"
+              className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
+            >
+              + Nuevo negocio
+            </Link>
+          )}
+          <form action="/api/logout" method="post">
+            <button className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700">Salir</button>
+          </form>
+        </div>
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-8">

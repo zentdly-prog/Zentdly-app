@@ -3,15 +3,32 @@ const encoder = new TextEncoder();
 export const SITE_AUTH_COOKIE = "zentdly_site_session";
 export const SITE_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
+export type PanelRole = "admin" | "lite";
+
+export interface SiteSession {
+  valid: boolean;
+  role: PanelRole;
+  username: string;
+}
+
 function base64Url(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
+  for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function encodeField(value: string) {
+  return btoa(unescape(encodeURIComponent(value))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeField(value: string) {
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    return decodeURIComponent(escape(atob(padded)));
+  } catch {
+    return "";
+  }
 }
 
 async function sign(value: string, secret: string) {
@@ -37,40 +54,54 @@ export function getSiteAuthCredentials() {
   };
 }
 
-export async function createSiteAuthToken() {
+export async function createSiteAuthToken(role: PanelRole = "admin", username = "admin") {
   const secret = getAuthSecret();
-
   if (!secret) {
     throw new Error("SITE_AUTH_SECRET is not configured");
   }
 
   const issuedAt = Math.floor(Date.now() / 1000).toString();
-  const signature = await sign(issuedAt, secret);
-
-  return `${issuedAt}.${signature}`;
+  const userField = encodeField(username);
+  const payload = `${issuedAt}.${role}.${userField}`;
+  const signature = await sign(payload, secret);
+  return `${payload}.${signature}`;
 }
 
-export async function verifySiteAuthToken(token: string | undefined) {
+export async function verifySiteAuthSession(token: string | undefined): Promise<SiteSession> {
+  const invalid: SiteSession = { valid: false, role: "lite", username: "" };
   const secret = getAuthSecret();
+  if (!secret || !token) return invalid;
 
-  if (!secret || !token) {
-    return false;
+  const parts = token.split(".");
+
+  // Legacy token format: {issuedAt}.{signature} → treat as admin
+  if (parts.length === 2) {
+    const [issuedAt, signature] = parts;
+    if (!(await isFreshAndSigned(issuedAt, issuedAt, signature, secret))) return invalid;
+    return { valid: true, role: "admin", username: "admin" };
   }
 
-  const [issuedAt, signature] = token.split(".");
+  if (parts.length !== 4) return invalid;
+  const [issuedAt, role, userField, signature] = parts;
+  const payload = `${issuedAt}.${role}.${userField}`;
+  if (!(await isFreshAndSigned(issuedAt, payload, signature, secret))) return invalid;
+  if (role !== "admin" && role !== "lite") return invalid;
+
+  return { valid: true, role: role as PanelRole, username: decodeField(userField) || "usuario" };
+}
+
+async function isFreshAndSigned(issuedAt: string, payload: string, signature: string, secret: string) {
   const issuedAtNumber = Number(issuedAt);
-
-  if (!issuedAt || !signature || !Number.isFinite(issuedAtNumber)) {
-    return false;
-  }
+  if (!issuedAt || !signature || !Number.isFinite(issuedAtNumber)) return false;
 
   const ageSeconds = Math.floor(Date.now() / 1000) - issuedAtNumber;
+  if (ageSeconds < 0 || ageSeconds > SITE_AUTH_MAX_AGE_SECONDS) return false;
 
-  if (ageSeconds < 0 || ageSeconds > SITE_AUTH_MAX_AGE_SECONDS) {
-    return false;
-  }
+  const expected = await sign(payload, secret);
+  return signature === expected;
+}
 
-  const expectedSignature = await sign(issuedAt, secret);
-
-  return signature === expectedSignature;
+// Back-compat helper used by middleware that only needs a yes/no.
+export async function verifySiteAuthToken(token: string | undefined): Promise<boolean> {
+  return (await verifySiteAuthSession(token)).valid;
 }

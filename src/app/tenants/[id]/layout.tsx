@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { getTenant } from "@/lib/actions/tenants";
 import { notFound } from "next/navigation";
+import { getSession } from "@/lib/session";
 
-const TABS = [
+const ALL_TABS = [
   { href: "", label: "General" },
   { href: "/courts", label: "Canchas" },
   { href: "/reservations", label: "Reservas" },
@@ -15,6 +16,9 @@ const TABS = [
   { href: "/google", label: "Google" },
 ];
 
+// Tabs visible to "lite" operators.
+const LITE_TABS = new Set(["/calendar", "/reservations", "/inbox"]);
+
 export default async function TenantLayout({
   children,
   params,
@@ -25,6 +29,9 @@ export default async function TenantLayout({
   const { id } = await params;
   const tenant = await getTenant(id);
   if (!tenant) notFound();
+
+  const session = await getSession();
+  const tabs = session.role === "lite" ? ALL_TABS.filter((t) => LITE_TABS.has(t.href)) : ALL_TABS;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -46,7 +53,7 @@ export default async function TenantLayout({
           </div>
 
           <nav className="flex gap-1 -mb-px">
-            {TABS.map((tab) => (
+            {tabs.map((tab) => (
               <TabLink key={tab.href} tenantId={id} href={tab.href} label={tab.label} />
             ))}
           </nav>
