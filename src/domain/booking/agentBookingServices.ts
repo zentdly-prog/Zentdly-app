@@ -642,14 +642,27 @@ export class AgentReservationCommandService {
       await this.context.calendarSync?.delete(reservation.external_event_id, this.context.timezone);
     }
 
-    const { data, error } = await this.context.db
+    const cancelPayload: Record<string, unknown> = { status: "cancelled", cancelled_at: new Date().toISOString(), cancelled_by: "ai" };
+    let { data, error } = await this.context.db
       .from("reservations")
-      .update({ status: "cancelled" })
+      .update(cancelPayload)
       .eq("tenant_id", this.context.tenantId)
       .eq("customer_id", this.context.customerId)
       .in("id", reservations.map((reservation) => reservation.id))
       .in("status", ["confirmed", "pending"])
       .select("id");
+
+    // Fallback if cancellation-tracking columns aren't applied yet
+    if (error?.code === "42703") {
+      ({ data, error } = await this.context.db
+        .from("reservations")
+        .update({ status: "cancelled" })
+        .eq("tenant_id", this.context.tenantId)
+        .eq("customer_id", this.context.customerId)
+        .in("id", reservations.map((reservation) => reservation.id))
+        .in("status", ["confirmed", "pending"])
+        .select("id"));
+    }
 
     if (error || !data?.length) {
       return { ok: false, reply: "No pude cancelar esas reservas.", cancelledIds: [] };

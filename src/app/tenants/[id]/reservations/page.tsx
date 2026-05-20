@@ -1,5 +1,5 @@
 import { formatInTimeZone } from "date-fns-tz";
-import { getPanelReservations, updateReservationStatus } from "@/lib/actions/reservationsPanel";
+import { getAiReservationStats, getPanelReservations, updateReservationStatus } from "@/lib/actions/reservationsPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -12,11 +12,27 @@ function one<T>(value: Relation<T>): T | null {
 
 export default async function ReservationsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const reservations = await getPanelReservations(id);
   const tz = "America/Argentina/Buenos_Aires";
+  const [reservations, stats] = await Promise.all([
+    getPanelReservations(id),
+    getAiReservationStats(id, tz),
+  ]);
 
   return (
     <div>
+      <div className="mb-6 grid grid-cols-2 gap-3 sm:max-w-md">
+        <div className="rounded-xl border border-green-200 bg-green-50 p-4">
+          <div className="text-2xl font-semibold text-green-800">{stats.created}</div>
+          <div className="text-xs text-green-700 mt-0.5">Reservas hechas por la IA</div>
+          <div className="text-[11px] text-green-600/70 capitalize">{stats.monthLabel}</div>
+        </div>
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+          <div className="text-2xl font-semibold text-red-800">{stats.cancelled}</div>
+          <div className="text-xs text-red-700 mt-0.5">Canceladas por la IA</div>
+          <div className="text-[11px] text-red-600/70 capitalize">{stats.monthLabel}</div>
+        </div>
+      </div>
+
       <h2 className="text-lg font-semibold text-gray-900 mb-4">Reservas próximas</h2>
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {reservations.length === 0 ? (
