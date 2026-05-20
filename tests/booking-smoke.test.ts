@@ -127,7 +127,7 @@ async function smokeDocumentAsDepositProof() {
   assert.equal(db.reservations.filter((r) => r.status === "pending").length, 1);
 
   const proof = await route(db, "[document]");
-  assert.match(proof.reply ?? "", /Reserva confirmada con seña/i, JSON.stringify(proof));
+  assert.match(proof.reply ?? "", /confirmad[ao]s? con seña/i, JSON.stringify(proof));
   assert.equal(db.reservations.filter((r) => r.status === "confirmed").length, 1);
 }
 
@@ -221,7 +221,7 @@ async function smokeSecondBookingDoesNotInheritFirst() {
   const first = await route(db, `Quiero reservar 3 canchas de padel para ${firstDate} a las 20 a nombre de Mora`);
   assert.match(first.reply ?? "", /Reserva pendiente para 3 canchas/i);
   const proof = await route(db, "Te paso el comprobante");
-  assert.match(proof.reply ?? "", /Reserva confirmada con seña/i);
+  assert.match(proof.reply ?? "", /confirmad[ao]s? con seña/i);
 
   // Reserva 2 en la misma conversación, sin dar cantidad ni nombre — debe pedirlos, NO heredar 3 ni "Mora"
   const second = await route(db, `Te pido otra cancha para ${secondDate} a las 21`);
@@ -254,7 +254,7 @@ async function smokeBookingWithDepositAndCancellation() {
 
   const confirm = await route(db, "Te mando el comprobante de la seña");
   assert.equal(confirm.handled, true, JSON.stringify(confirm));
-  assert.match(confirm.reply ?? "", /Reserva confirmada con seña recibida/i);
+  assert.match(confirm.reply ?? "", /confirmad[ao]s? con seña recibida/i);
   assert.equal(db.reservations.filter((reservation) => reservation.status === "confirmed").length, 3);
 
   const cancelOffer = await route(db, "Cancelame esas 3");

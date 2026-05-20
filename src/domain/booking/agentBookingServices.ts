@@ -287,15 +287,19 @@ export class AgentAvailabilityService {
     startsAt: Date,
     endsAt: Date,
     excludeReservationId?: string | string[],
+    sameCustomerPendingId?: string,
   ): Promise<{ id: string; notes: string | null }[]> {
     // Conflict checks only look at confirmed reservations — pending bookings
-    // do not lock the slot. Multiple pendings can coexist at the same time.
+    // do not lock the slot for OTHER customers. But for court-UNIT assignment
+    // we also count the same customer's own pending reservations at this slot,
+    // so a customer booking N courts gets N distinct physical courts (not all
+    // "Cancha 1"). Pass sameCustomerPendingId to include them.
     let query = this.db
       .from("reservations")
-      .select("id, notes")
+      .select("id, notes, status, customer_id")
       .eq("tenant_id", this.tenantId)
       .eq("court_type_id", court.id)
-      .eq("status", "confirmed")
+      .in("status", ["confirmed", "pending"])
       .lt("starts_at", endsAt.toISOString())
       .gt("ends_at", startsAt.toISOString());
 
@@ -306,7 +310,14 @@ export class AgentAvailabilityService {
     }
 
     const { data } = await query;
-    return (data ?? []) as { id: string; notes: string | null }[];
+    const rows = (data ?? []) as { id: string; notes: string | null; status: string; customer_id: string }[];
+    return rows
+      .filter((r) => {
+        if (r.status === "confirmed") return true;
+        // include same-customer pendings only when explicitly requested (for assignment)
+        return Boolean(sameCustomerPendingId) && r.customer_id === sameCustomerPendingId;
+      })
+      .map((r) => ({ id: r.id, notes: r.notes }));
   }
 
   private getSlotWindow(court: ReservableCourt, date: string): { start: Date; end: Date } {
@@ -367,7 +378,7 @@ export class AgentReservationCommandService {
       }
       const startsAt = parseISO(reservation.starts_at);
       const endsAt = parseISO(reservation.ends_at);
-      const overlapping = await this.availability.findOverlappingReservations(court, startsAt, endsAt, reservation.id);
+      const overlapping = await this.availability.findOverlappingReservations(court, startsAt, endsAt, reservation.id, this.context.customerId);
       const capacity = getCourtCapacity(court);
       if (overlapping.length >= capacity) {
         conflicts.push(reservation);
@@ -413,17 +424,30 @@ export class AgentReservationCommandService {
       );
     }
 
-    const first = confirmable[0];
-    const sport = relationOne(first.court_types)?.sport_name ?? args.sport_name ?? "Cancha";
-    const start = formatInTimeZone(parseISO(first.starts_at), this.context.timezone, "dd/MM HH:mm");
-    const quantity = data.length;
+    const confirmedRows = data as Array<CalendarSyncReservation & { court_types?: { sport_name: string } | { sport_name: string }[] | null }>;
+    const quantity = confirmedRows.length;
+
+    // Group confirmed reservations by date+time so multi-slot confirmations
+    // are reported in full (e.g. "3 a las 09:00 y 1 a las 10:00").
+    const bySlot = new Map<string, number>();
+    for (const r of confirmedRows) {
+      const label = formatInTimeZone(parseISO(r.starts_at), this.context.timezone, "dd/MM HH:mm");
+      bySlot.set(label, (bySlot.get(label) ?? 0) + 1);
+    }
+    const sport = relationOne(confirmable[0].court_types)?.sport_name ?? args.sport_name ?? "Cancha";
+    const slotLines = [...bySlot.entries()]
+      .map(([label, count]) => `• ${count} cancha${count !== 1 ? "s" : ""} · ${label} hs`)
+      .join("\n");
+
     const conflictNote = conflicts.length
       ? `\n\n⚠️ No pude confirmar ${conflicts.length} reserva${conflicts.length !== 1 ? "s" : ""} porque alguien más ya tomó ese horario.`
       : "";
 
-    return `✅ Reserva confirmada con seña recibida.\n` +
-      `• ${quantity} cancha${quantity !== 1 ? "s" : ""} de ${sport}\n` +
-      `• ${start} hs${conflictNote}`;
+    const header = quantity === 1
+      ? `✅ Reserva confirmada con seña recibida (${sport}):`
+      : `✅ ${quantity} reservas confirmadas con seña recibida (${sport}). TODAS quedaron confirmadas:`;
+
+    return `${header}\n${slotLines}${conflictNote}`;
   }
 
   async createReservation(args: Record<string, string>): Promise<{ ok: boolean; reply: string; id?: string; status?: ReservationStatus }> {
@@ -439,7 +463,9 @@ export class AgentReservationCommandService {
     if (slotError) return { ok: false, reply: slotError };
 
     const { startsAt, endsAt } = this.availability.buildReservationRange(court, date, time);
-    const existing = await this.availability.findOverlappingReservations(court, startsAt, endsAt);
+    // Count confirmed (any customer) + this customer's own pending at the slot,
+    // so booking N courts assigns N distinct physical courts.
+    const existing = await this.availability.findOverlappingReservations(court, startsAt, endsAt, undefined, this.context.customerId);
 
     if (existing.length >= getCourtCapacity(court)) {
       const availability = await this.availability.check(date, court.sport_name);
