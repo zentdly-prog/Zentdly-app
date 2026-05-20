@@ -2,6 +2,21 @@
 
 import { createServerClient } from "@/infrastructure/supabase/server";
 import { revalidatePath } from "next/cache";
+import { importCalendarEventsThrottled } from "@/integrations/google/calendarImporter";
+
+/**
+ * Pulls externally-created Google Calendar events into the DB so they appear
+ * in the panel calendar/reservations. Throttled per tenant; safe to call on
+ * every panel page load.
+ */
+export async function syncTenantCalendar(tenantId: string, timezone = "America/Argentina/Buenos_Aires") {
+  try {
+    const db = createServerClient();
+    await importCalendarEventsThrottled(db, tenantId, timezone);
+  } catch {
+    // non-fatal — panel still renders what's in the DB
+  }
+}
 
 export async function getGoogleConfig(tenantId: string) {
   try {

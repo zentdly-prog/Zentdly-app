@@ -1,5 +1,6 @@
 import { formatInTimeZone } from "date-fns-tz";
 import { getAiReservationStats, getPanelReservations, updateReservationStatus } from "@/lib/actions/reservationsPanel";
+import { syncTenantCalendar } from "@/lib/actions/google";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,7 @@ function one<T>(value: Relation<T>): T | null {
 export default async function ReservationsPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const tz = "America/Argentina/Buenos_Aires";
+  await syncTenantCalendar(id, tz);
   const [reservations, stats] = await Promise.all([
     getPanelReservations(id),
     getAiReservationStats(id, tz),

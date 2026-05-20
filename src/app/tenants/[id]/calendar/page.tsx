@@ -3,6 +3,7 @@ import { addDays, parseISO } from "date-fns";
 import Link from "next/link";
 import { getCourtTypes } from "@/lib/actions/courts";
 import { getPanelReservations } from "@/lib/actions/reservationsPanel";
+import { syncTenantCalendar } from "@/lib/actions/google";
 import { getActiveCourtUnits } from "@/domain/courts/courtUnits";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +30,8 @@ export default async function CalendarPage({
   const selectedDay = parseISO(`${selectedDate}T12:00:00`);
   const previousDate = formatInTimeZone(addDays(selectedDay, -1), tz, "yyyy-MM-dd");
   const nextDate = formatInTimeZone(addDays(selectedDay, 1), tz, "yyyy-MM-dd");
+  // Pull externally-created Google Calendar events before reading reservations.
+  await syncTenantCalendar(id, tz);
   const [courts, reservations] = await Promise.all([
     getCourtTypes(id),
     getPanelReservations(id, { date: selectedDate, timezone: tz }),
