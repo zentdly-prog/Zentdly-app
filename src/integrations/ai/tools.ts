@@ -6,6 +6,7 @@ import {
 } from "@/domain/booking/agentBookingServices";
 import { computeDepositAmount, formatMoney } from "@/domain/booking/reservationRules";
 import { getBotPolicy } from "@/lib/actions/policies";
+import { importCalendarEventsThrottled } from "@/integrations/google/calendarImporter";
 
 export interface AgentToolDeps {
   db: SupabaseClient;
@@ -162,12 +163,17 @@ export async function executeTool(
 
   switch (name) {
     case "check_availability": {
+      // Pull any externally-created Google Calendar events into the DB first
+      // so availability reflects manual bookings (throttled to once/min).
+      await importCalendarEventsThrottled(deps.db, deps.tenantId, deps.timezone).catch(() => undefined);
       const date = String(args.date);
       const sport = args.sport ? String(args.sport) : undefined;
       return booking.availability.check(date, sport);
     }
 
     case "create_reservation": {
+      // Ensure manual calendar events are imported before we check the slot.
+      await importCalendarEventsThrottled(deps.db, deps.tenantId, deps.timezone).catch(() => undefined);
       const quantity = Math.max(1, Math.min(10, Number(args.quantity ?? 1)));
       const baseArgs: Record<string, string> = {
         date: String(args.date),

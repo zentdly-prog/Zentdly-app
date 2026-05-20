@@ -3,6 +3,14 @@ import { IntegrationError } from "@/lib/errors";
 import type { Reservation } from "@/types/database";
 import type { GoogleIntegrationProvider, SyncReservationResult } from "./types";
 
+export interface CalendarEvent {
+  id: string;
+  iCalUID: string;
+  summary: string;
+  startsAt: string;
+  endsAt: string;
+}
+
 export interface CalendarConfig {
   credentials: {
     client_email: string;
@@ -65,6 +73,40 @@ export class GoogleCalendarProvider implements GoogleIntegrationProvider {
       });
 
       return { externalId: created.data.id! };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new IntegrationError("google_calendar", message);
+    }
+  }
+
+  /**
+   * Lists events between timeMin and timeMax. Returns simplified shapes,
+   * skipping cancelled events. Used by the Calendar → DB importer.
+   */
+  async listEvents(timeMin: Date, timeMax: Date): Promise<CalendarEvent[]> {
+    const calendar = this.getClient();
+    try {
+      const res = await calendar.events.list({
+        calendarId: this.config.calendar_id,
+        timeMin: timeMin.toISOString(),
+        timeMax: timeMax.toISOString(),
+        singleEvents: true,
+        orderBy: "startTime",
+        maxResults: 250,
+      });
+
+      const items = res.data.items ?? [];
+      return items
+        .filter((e) => e.status !== "cancelled")
+        .filter((e) => e.start?.dateTime && e.end?.dateTime) // skip all-day events
+        .map((e) => ({
+          id: e.id ?? "",
+          iCalUID: e.iCalUID ?? "",
+          summary: e.summary ?? "",
+          startsAt: e.start!.dateTime!,
+          endsAt: e.end!.dateTime!,
+        }))
+        .filter((e) => e.id);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       throw new IntegrationError("google_calendar", message);
