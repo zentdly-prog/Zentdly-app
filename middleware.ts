@@ -16,24 +16,25 @@ function isPublicPath(pathname: string) {
   );
 }
 
-function liteCanAccess(pathname: string): boolean {
-  if (pathname === "/") return true; // negocios list — pick a complejo
+function liteCanAccess(pathname: string, tenantId: string | null): boolean {
+  if (!tenantId) return false; // lite must be scoped to a tenant
 
   const tenantMatch = pathname.match(/^\/tenants\/([^/]+)(\/.*)?$/);
-  if (!tenantMatch) return false; // any other top-level area is admin-only
+  if (!tenantMatch) return false; // only their tenant's pages
+
+  // Must be THEIR tenant
+  if (tenantMatch[1] !== tenantId) return false;
 
   const suffix = tenantMatch[2] ?? "";
   return LITE_ALLOWED_TENANT_SUFFIXES.some((allowed) => suffix === allowed || suffix.startsWith(`${allowed}/`));
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function liteRedirectTarget(pathname: string, requestUrl: string): URL {
-  const tenantMatch = pathname.match(/^\/tenants\/([^/]+)/);
-  if (tenantMatch && UUID_RE.test(tenantMatch[1])) {
-    return new URL(`/tenants/${tenantMatch[1]}/calendar`, requestUrl);
-  }
-  return new URL("/", requestUrl);
+function liteRedirectTarget(tenantId: string | null, requestUrl: string): URL {
+  if (tenantId) return new URL(`/tenants/${tenantId}/calendar`, requestUrl);
+  // No tenant scope → session is unusable; force re-login.
+  const loginUrl = new URL("/login", requestUrl);
+  loginUrl.searchParams.set("error", "config");
+  return loginUrl;
 }
 
 export async function middleware(request: NextRequest) {
@@ -54,9 +55,9 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // Role gate: lite users only reach calendar / reservations / inbox.
-  if (session.role === "lite" && !liteCanAccess(pathname)) {
-    return NextResponse.redirect(liteRedirectTarget(pathname, request.url));
+  // Role gate: lite users only reach their own tenant's calendar / reservations / inbox.
+  if (session.role === "lite" && !liteCanAccess(pathname, session.tenantId)) {
+    return NextResponse.redirect(liteRedirectTarget(session.tenantId, request.url));
   }
 
   return NextResponse.next();

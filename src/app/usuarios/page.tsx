@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { getPanelUsersForAdmin } from "@/lib/actions/users";
+import { getTenants } from "@/lib/actions/tenants";
 import UsersClient from "./UsersClient";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +12,8 @@ export default async function UsuariosPage() {
   if (!session.valid) redirect("/login?next=/usuarios");
   if (session.role !== "admin") redirect("/");
 
-  const users = await getPanelUsersForAdmin();
+  const [users, tenants] = await Promise.all([getPanelUsersForAdmin(), getTenants()]);
+  const tenantOptions = tenants.map((t) => ({ id: t.id as string, name: t.name as string }));
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -22,7 +24,7 @@ export default async function UsuariosPage() {
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8">
-        <UsersClient users={users} />
+        <UsersClient users={users} tenants={tenantOptions} />
       </main>
     </div>
   );

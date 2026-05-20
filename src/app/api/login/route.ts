@@ -29,6 +29,7 @@ export async function POST(request: NextRequest) {
 
   let role: PanelRole | null = null;
   let authedUsername = username;
+  let tenantId: string | null = null;
 
   // 1. Env bootstrap super-admin
   if (username === credentials.username && password === credentials.password) {
@@ -39,6 +40,7 @@ export async function POST(request: NextRequest) {
     if (panelUser) {
       role = panelUser.role;
       authedUsername = panelUser.username;
+      tenantId = panelUser.tenantId;
     }
   }
 
@@ -49,10 +51,19 @@ export async function POST(request: NextRequest) {
     return NextResponse.redirect(loginUrl, 303);
   }
 
-  // Lite users land on a usable page, not the admin overview.
-  const destination = role === "lite" && nextPath === "/" ? "/" : nextPath;
+  // A lite user with no tenant assigned can't do anything — reject.
+  if (role === "lite" && !tenantId) {
+    const loginUrl = new URL("/login", request.url);
+    loginUrl.searchParams.set("error", "config");
+    return NextResponse.redirect(loginUrl, 303);
+  }
+
+  // Lite users go straight to their business calendar.
+  const destination = role === "lite" && tenantId
+    ? `/tenants/${tenantId}/calendar`
+    : nextPath;
   const response = NextResponse.redirect(new URL(destination, request.url), 303);
-  const token = await createSiteAuthToken(role, authedUsername);
+  const token = await createSiteAuthToken(role, authedUsername, tenantId);
 
   response.cookies.set({
     name: SITE_AUTH_COOKIE,

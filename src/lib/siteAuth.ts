@@ -9,6 +9,7 @@ export interface SiteSession {
   valid: boolean;
   role: PanelRole;
   username: string;
+  tenantId: string | null;
 }
 
 function base64Url(buffer: ArrayBuffer) {
@@ -54,7 +55,11 @@ export function getSiteAuthCredentials() {
   };
 }
 
-export async function createSiteAuthToken(role: PanelRole = "admin", username = "admin") {
+export async function createSiteAuthToken(
+  role: PanelRole = "admin",
+  username = "admin",
+  tenantId: string | null = null,
+) {
   const secret = getAuthSecret();
   if (!secret) {
     throw new Error("SITE_AUTH_SECRET is not configured");
@@ -62,13 +67,14 @@ export async function createSiteAuthToken(role: PanelRole = "admin", username = 
 
   const issuedAt = Math.floor(Date.now() / 1000).toString();
   const userField = encodeField(username);
-  const payload = `${issuedAt}.${role}.${userField}`;
+  const tenantField = tenantId ?? "all";
+  const payload = `${issuedAt}.${role}.${userField}.${tenantField}`;
   const signature = await sign(payload, secret);
   return `${payload}.${signature}`;
 }
 
 export async function verifySiteAuthSession(token: string | undefined): Promise<SiteSession> {
-  const invalid: SiteSession = { valid: false, role: "lite", username: "" };
+  const invalid: SiteSession = { valid: false, role: "lite", username: "", tenantId: null };
   const secret = getAuthSecret();
   if (!secret || !token) return invalid;
 
@@ -78,16 +84,31 @@ export async function verifySiteAuthSession(token: string | undefined): Promise<
   if (parts.length === 2) {
     const [issuedAt, signature] = parts;
     if (!(await isFreshAndSigned(issuedAt, issuedAt, signature, secret))) return invalid;
-    return { valid: true, role: "admin", username: "admin" };
+    return { valid: true, role: "admin", username: "admin", tenantId: null };
   }
 
-  if (parts.length !== 4) return invalid;
-  const [issuedAt, role, userField, signature] = parts;
-  const payload = `${issuedAt}.${role}.${userField}`;
+  // Previous format: {issuedAt}.{role}.{userB64}.{signature} → no tenant scope
+  if (parts.length === 4) {
+    const [issuedAt, role, userField, signature] = parts;
+    const payload = `${issuedAt}.${role}.${userField}`;
+    if (!(await isFreshAndSigned(issuedAt, payload, signature, secret))) return invalid;
+    if (role !== "admin" && role !== "lite") return invalid;
+    return { valid: true, role: role as PanelRole, username: decodeField(userField) || "usuario", tenantId: null };
+  }
+
+  // Current format: {issuedAt}.{role}.{userB64}.{tenant}.{signature}
+  if (parts.length !== 5) return invalid;
+  const [issuedAt, role, userField, tenantField, signature] = parts;
+  const payload = `${issuedAt}.${role}.${userField}.${tenantField}`;
   if (!(await isFreshAndSigned(issuedAt, payload, signature, secret))) return invalid;
   if (role !== "admin" && role !== "lite") return invalid;
 
-  return { valid: true, role: role as PanelRole, username: decodeField(userField) || "usuario" };
+  return {
+    valid: true,
+    role: role as PanelRole,
+    username: decodeField(userField) || "usuario",
+    tenantId: tenantField && tenantField !== "all" ? tenantField : null,
+  };
 }
 
 async function isFreshAndSigned(issuedAt: string, payload: string, signature: string, secret: string) {

@@ -21,8 +21,10 @@ export async function createPanelUserAction(_prev: unknown, formData: FormData) 
   const password = String(formData.get("password") ?? "");
   const roleRaw = String(formData.get("role") ?? "lite");
   const role: PanelRole = roleRaw === "admin" ? "admin" : "lite";
+  const tenantIdRaw = String(formData.get("tenant_id") ?? "");
+  const tenantId = tenantIdRaw && tenantIdRaw !== "all" ? tenantIdRaw : null;
 
-  const result = await createPanelUser(username, password, role);
+  const result = await createPanelUser(username, password, role, tenantId);
   if (!result.ok) return { error: result.error };
 
   revalidatePath("/usuarios");
