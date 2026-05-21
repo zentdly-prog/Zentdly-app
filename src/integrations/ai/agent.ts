@@ -6,9 +6,13 @@ import type {
 import { logAgentEvent } from "@/domain/conversation/agentOps";
 import { AGENT_TOOLS, executeTool, type AgentToolDeps } from "@/integrations/ai/tools";
 
-const AGENT_MODEL = "gpt-4o";
+// gpt-4o-mini keeps each round fast enough to finish within the serverless
+// timeout (Vercel Hobby caps functions at ~10s). The tool-based architecture
+// is the real quality lever; mini handles it well. Can move back to gpt-4o
+// if the deployment runs on a plan with a longer maxDuration.
+const AGENT_MODEL = "gpt-4o-mini";
 const AGENT_TEMPERATURE = 0.3;
-const MAX_TOOL_ROUNDS = 6;
+const MAX_TOOL_ROUNDS = 4;
 
 let openaiClient: OpenAI | null = null;
 
@@ -16,7 +20,13 @@ function getOpenAIClient(): OpenAI {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY environment variable");
   }
-  openaiClient ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  // Cap per-request time + retries so a slow OpenAI call fails fast and is
+  // logged as agent_error instead of silently hitting the function timeout.
+  openaiClient ??= new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+    timeout: 12_000,
+    maxRetries: 1,
+  });
   return openaiClient;
 }
 
