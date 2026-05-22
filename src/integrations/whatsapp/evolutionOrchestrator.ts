@@ -235,27 +235,42 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
 
   // ── 8. Send + save ───────────────────────────────────────────────────────────
   recordRecentOutbound(conversation.id, reply);
-  await evolutionSendText(msg.instanceName, msg.jid, reply);
 
+  // Persist the outbound reply BEFORE sending, so a delivery failure (e.g.
+  // Evolution "Connection Closed") doesn't lose the message and is visible.
   await db.from("messages").insert({
     conversation_id: conversation.id,
     direction: "outbound",
     content: reply,
     raw_payload: { agent: true },
   });
-
   await db
     .from("conversations")
     .update({ last_message_at: new Date().toISOString() })
     .eq("id", conversation.id);
 
-  await logAgentEvent(db, {
-    tenantId,
-    conversationId: conversation.id,
-    customerId: customer.id,
-    eventType: "agent_reply_sent",
-    payload: { reply },
-  });
+  try {
+    await evolutionSendText(msg.instanceName, msg.jid, reply);
+    await logAgentEvent(db, {
+      tenantId,
+      conversationId: conversation.id,
+      customerId: customer.id,
+      eventType: "agent_reply_sent",
+      payload: { reply },
+    });
+  } catch (sendError) {
+    // Delivery failed — log it explicitly instead of letting the webhook
+    // swallow it. Usually means the Evolution/WhatsApp socket is down.
+    await logAgentEvent(db, {
+      tenantId,
+      conversationId: conversation.id,
+      customerId: customer.id,
+      eventType: "whatsapp_send_failed",
+      payload: { reply: reply.slice(0, 200) },
+      error: sendError instanceof Error ? sendError.message : "unknown send error",
+    });
+    console.error("[agent] evolutionSendText failed:", sendError);
+  }
 
   // ── 9. Google sync safety pass (fire & forget) ──────────────────────────────
   syncGoogleIfNeeded(db, tenantId).catch((e) =>
