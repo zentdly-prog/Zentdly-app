@@ -145,6 +145,25 @@ export const AGENT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "request_human_support",
+      description:
+        "Cuando el cliente quiere hablar con un humano o el agente no puede resolver (ej. reclamo, problema técnico, solicitud especial), usá esto. Notifica al dueño del negocio por mail y le avisa al cliente que lo va a contactar.",
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description: "Breve resumen de por qué necesita ayuda. Ejemplo: 'El cliente tiene un reclamo por un turno reservado incorrectamente'",
+          },
+        },
+        required: ["reason"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export async function executeTool(
@@ -278,6 +297,36 @@ export async function executeTool(
 
     case "get_business_info": {
       return getBusinessInfo(deps, String(args.topic));
+    }
+
+    case "request_human_support": {
+      const { sendHumanSupportAlert } = await import("@/integrations/email/resendSender");
+      const reason = String(args.reason || "Usuario solicitó ayuda");
+
+      // Fetch tenant's contact email
+      const { data: tenant } = await deps.db
+        .from("tenants")
+        .select("name, contact_email")
+        .eq("id", deps.tenantId)
+        .single();
+
+      if (!tenant?.contact_email) {
+        return "El negocio no tiene email de contacto configurado. Decile al cliente que te escriba por WhatsApp y se lo vas a pasar al equipo manualmente.";
+      }
+
+      // Send email to business owner
+      const mailResult = await sendHumanSupportAlert(
+        tenant.contact_email,
+        tenant.name as string,
+        deps.customerPhone,
+        reason,
+      );
+
+      if (!mailResult.ok) {
+        console.warn("[agent] Failed to send support alert:", mailResult.error);
+      }
+
+      return "Entendido. Le avisé al equipo del complejo que te contacte. Mientras tanto, deja que te siga ayudando con lo que necesites. 🙌";
     }
 
     default:
