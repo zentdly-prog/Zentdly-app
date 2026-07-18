@@ -5,6 +5,9 @@ import { handleIncomingMessage } from "@/integrations/whatsapp/messageOrchestrat
 import { handleEvolutionMessage } from "@/integrations/whatsapp/evolutionOrchestrator";
 import type { EvolutionIncomingMessage } from "@/integrations/whatsapp/evolutionOrchestrator";
 
+// Messages older than this are stale retries — ignore them to prevent replay storms
+const MAX_MESSAGE_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
 // Meta Cloud API webhook verification (GET)
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -87,6 +90,14 @@ function parseEvolutionPayload(payload: Record<string, unknown>): EvolutionIncom
     const remoteJid = key?.remoteJid as string;
     const remoteJidAlt = key?.remoteJidAlt as string | undefined;
     if (!remoteJid || remoteJid.includes("@g.us")) return null; // skip groups
+
+    // Drop stale webhook retries — Evolution retries for hours if delivery fails (e.g. during DB outage).
+    // Without this guard, a DB downtime causes a replay storm that spams all customers.
+    const messageTimestamp = data?.messageTimestamp as number | undefined;
+    if (messageTimestamp) {
+      const ageMs = Date.now() - messageTimestamp * 1000;
+      if (ageMs > MAX_MESSAGE_AGE_MS) return null;
+    }
 
     const fromJid = remoteJid.endsWith("@lid") && remoteJidAlt ? remoteJidAlt : remoteJid;
     const from = fromJid.split("@")[0];

@@ -34,6 +34,27 @@ export async function getTenantConversations(tenantId: string) {
   }
 }
 
+export async function getHumanQueue(tenantId: string) {
+  try {
+    const db = createServerClient();
+    const { data } = await db
+      .from("conversations")
+      .select("id, external_chat_id, last_message_at, human_reason, customers(name, phone_e164)")
+      .eq("tenant_id", tenantId)
+      .eq("requires_human", true)
+      .order("last_message_at", { ascending: false });
+    return (data ?? []) as Array<{
+      id: string;
+      external_chat_id: string;
+      last_message_at: string;
+      human_reason: string | null;
+      customers: { name: string | null; phone_e164: string | null } | { name: string | null; phone_e164: string | null }[] | null;
+    }>;
+  } catch {
+    return [];
+  }
+}
+
 export async function getConversationMessages(conversationId: string) {
   try {
     const db = createServerClient();

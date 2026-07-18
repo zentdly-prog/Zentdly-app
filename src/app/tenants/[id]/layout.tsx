@@ -2,6 +2,8 @@ import Link from "next/link";
 import { getTenant } from "@/lib/actions/tenants";
 import { notFound } from "next/navigation";
 import { getSession } from "@/lib/session";
+import { getHumanQueue } from "@/lib/actions/conversations";
+import HumanSupportTab from "./HumanSupportTab";
 
 const ALL_TABS = [
   { href: "", label: "General" },
@@ -11,13 +13,14 @@ const ALL_TABS = [
   { href: "/policies", label: "Políticas" },
   { href: "/whatsapp", label: "WhatsApp" },
   { href: "/inbox", label: "Conversaciones" },
+  { href: "/support", label: "Atención humana" },
   { href: "/bot", label: "Bot / IA" },
   { href: "/logs", label: "Logs" },
   { href: "/google", label: "Google" },
 ];
 
 // Tabs visible to "lite" operators.
-const LITE_TABS = new Set(["/calendar", "/reservations", "/inbox"]);
+const LITE_TABS = new Set(["/calendar", "/reservations", "/inbox", "/support"]);
 
 export default async function TenantLayout({
   children,
@@ -32,6 +35,8 @@ export default async function TenantLayout({
 
   const session = await getSession();
   const tabs = session.role === "lite" ? ALL_TABS.filter((t) => LITE_TABS.has(t.href)) : ALL_TABS;
+
+  const humanQueue = await getHumanQueue(id);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -52,10 +57,19 @@ export default async function TenantLayout({
             </span>
           </div>
 
-          <nav className="flex gap-1 -mb-px">
-            {tabs.map((tab) => (
-              <TabLink key={tab.href} tenantId={id} href={tab.href} label={tab.label} />
-            ))}
+          <nav className="flex gap-1 -mb-px flex-wrap">
+            {tabs.map((tab) =>
+              tab.href === "/support" ? (
+                <HumanSupportTab
+                  key={tab.href}
+                  tenantId={id}
+                  initialCount={humanQueue.length}
+                  initialIds={humanQueue.map((c) => c.id)}
+                />
+              ) : (
+                <TabLink key={tab.href} tenantId={id} href={tab.href} label={tab.label} />
+              )
+            )}
           </nav>
         </div>
       </header>

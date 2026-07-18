@@ -1,11 +1,18 @@
 "use client";
 
 import { useActionState, useState, useTransition, useEffect, useRef } from "react";
-import { connectEvolutionWhatsApp, saveWhatsAppConfig, checkEvolutionConnection, toggleWhatsAppBot, toggleForgetCommand } from "@/lib/actions/whatsapp";
+import {
+  connectEvolutionWhatsApp,
+  saveWhatsAppConfig,
+  checkEvolutionConnection,
+  disconnectEvolutionWhatsApp,
+  toggleWhatsAppBot,
+  toggleForgetCommand,
+} from "@/lib/actions/whatsapp";
 import { SubmitButton } from "@/components/SubmitButton";
 import { Alert } from "@/components/Alert";
 
-type QrStatus = "idle" | "loading" | "qr" | "connected" | "error";
+type QrStatus = "checking" | "idle" | "loading" | "qr" | "connected" | "error";
 
 type Config = {
   provider?: string;
@@ -18,6 +25,8 @@ type Config = {
   meta_business_id?: string | null;
 } | null;
 
+const WEBHOOK_URL = "https://zentdly-three.vercel.app/api/webhooks/whatsapp";
+
 export default function WhatsAppClient({
   tenantId,
   initialConfig,
@@ -27,39 +36,35 @@ export default function WhatsAppClient({
 }) {
   const savedProvider = initialConfig?.provider === "meta" ? "meta" : "evolution";
   const [provider, setProvider] = useState<"evolution" | "meta">(savedProvider);
-  const [qrStatus, setQrStatus] = useState<QrStatus>("idle");
+  const [qrStatus, setQrStatus] = useState<QrStatus>(savedProvider === "evolution" ? "checking" : "idle");
   const [qr, setQr] = useState<string | null>(null);
   const [qrError, setQrError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const qrRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qrRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Check on mount if already connected
   useEffect(() => {
     if (savedProvider === "evolution") {
       checkEvolutionConnection(tenantId).then(({ connected }) => {
-        if (connected) setQrStatus("connected");
+        setQrStatus(connected ? "connected" : "idle");
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll connection state while QR is shown + auto-refresh QR before it expires
+  // While QR is shown: poll for connection + auto-refresh QR before it expires
   useEffect(() => {
     if (qrStatus === "qr") {
-      // Check if connected every 3s
       pollRef.current = setInterval(async () => {
         const { connected } = await checkEvolutionConnection(tenantId);
         if (connected) {
-          clearInterval(pollRef.current!);
-          if (qrRefreshRef.current) clearTimeout(qrRefreshRef.current);
           setQrStatus("connected");
           setQr(null);
         }
       }, 3000);
 
-      // Auto-refresh QR every 50s before it expires
-      qrRefreshRef.current = setTimeout(() => {
+      qrRefreshRef.current = setInterval(() => {
         startTransition(async () => {
           const res = await connectEvolutionWhatsApp(tenantId);
           if (res.connected) {
@@ -69,25 +74,19 @@ export default function WhatsAppClient({
             setQr(res.qr);
           }
         });
-      }, 50000);
-    } else {
-      if (pollRef.current) clearInterval(pollRef.current);
-      if (qrRefreshRef.current) clearTimeout(qrRefreshRef.current);
+      }, 40000);
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
-      if (qrRefreshRef.current) clearTimeout(qrRefreshRef.current);
+      if (qrRefreshRef.current) clearInterval(qrRefreshRef.current);
     };
-  }, [qrStatus, qr, tenantId]);
+  }, [qrStatus, tenantId]);
 
-  // Meta form state
   const [metaState, metaAction] = useActionState(saveWhatsAppConfig, null);
   const [botState, botAction] = useActionState(toggleWhatsAppBot, null);
   const [forgetState, forgetAction] = useActionState(toggleForgetCommand, null);
   const botEnabled = botState?.enabled ?? initialConfig?.bot_enabled ?? true;
   const forgetEnabled = forgetState?.enabled ?? initialConfig?.forget_command_enabled ?? true;
-
-  const webhookUrl = `https://zentdly-app.vercel.app/api/webhooks/whatsapp`;
 
   function handleGetQr() {
     setQr(null);
@@ -107,76 +106,37 @@ export default function WhatsAppClient({
     });
   }
 
+  function handleDisconnect() {
+    if (!confirm("¿Seguro que querés desconectar este WhatsApp? El bot dejará de recibir mensajes hasta que vuelvas a vincular un número.")) return;
+    startTransition(async () => {
+      await disconnectEvolutionWhatsApp(tenantId);
+      setQrStatus("idle");
+      setQr(null);
+    });
+  }
+
+  async function handleRefreshStatus() {
+    setQrStatus("checking");
+    const { connected } = await checkEvolutionConnection(tenantId);
+    setQrStatus(connected ? "connected" : "idle");
+  }
+
+  const isConnected = qrStatus === "connected";
+
   return (
     <div className="max-w-md">
       <h2 className="text-lg font-semibold text-gray-900 mb-1">WhatsApp</h2>
       <p className="text-sm text-gray-500 mb-6">
-        Elegí cómo conectar WhatsApp a este negocio.
+        Conectá el WhatsApp de este negocio para que el bot atienda a tus clientes.
       </p>
 
-      <form action={botAction} className={`mb-3 rounded-xl border p-4 ${botEnabled ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
-        <input type="hidden" name="tenant_id" value={tenantId} />
-        <input type="hidden" name="enabled" value={botEnabled ? "false" : "true"} />
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <p className={`text-sm font-semibold ${botEnabled ? "text-green-900" : "text-red-900"}`}>
-              Bot {botEnabled ? "activo" : "pausado"}
-            </p>
-            <p className={`text-xs ${botEnabled ? "text-green-700" : "text-red-700"}`}>
-              {botEnabled
-                ? "Responde automáticamente los mensajes entrantes."
-                : "Guarda mensajes, pero no responde automáticamente."}
-            </p>
-          </div>
-          <button
-            type="submit"
-            className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors ${
-              botEnabled ? "bg-red-600 hover:bg-red-700" : "bg-green-600 hover:bg-green-700"
-            }`}
-          >
-            {botEnabled ? "Pausar" : "Activar"}
-          </button>
-        </div>
-        {botState?.error && <p className="mt-2 text-xs text-red-600">{botState.error}</p>}
-      </form>
-
-      <form action={forgetAction} className="mb-6 rounded-xl border border-gray-200 bg-white p-4">
-        <input type="hidden" name="tenant_id" value={tenantId} />
-        <input type="hidden" name="enabled" value={forgetEnabled ? "false" : "true"} />
-        <label className="flex items-center justify-between gap-4 cursor-pointer">
-          <div>
-            <p className="text-sm font-semibold text-gray-900">Olvidar</p>
-            <p className="text-xs text-gray-500">
-              Permite que el cliente escriba &quot;olvidate&quot; o &quot;empezar de nuevo&quot; para reiniciar la conversación.
-            </p>
-          </div>
-          <button
-            type="submit"
-            role="switch"
-            aria-checked={forgetEnabled}
-            className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
-              forgetEnabled ? "bg-green-600" : "bg-gray-300"
-            }`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                forgetEnabled ? "translate-x-5" : "translate-x-0.5"
-              }`}
-            />
-          </button>
-        </label>
-        {forgetState?.error && <p className="mt-2 text-xs text-red-600">{forgetState.error}</p>}
-      </form>
-
-      {/* Toggle */}
+      {/* Provider toggle */}
       <div className="flex bg-gray-100 rounded-xl p-1 mb-6">
         <button
           type="button"
           onClick={() => setProvider("evolution")}
           className={`flex-1 py-2 text-sm font-medium rounded-lg transition-colors ${
-            provider === "evolution"
-              ? "bg-white text-gray-900 shadow-sm"
-              : "text-gray-500 hover:text-gray-700"
+            provider === "evolution" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
           }`}
         >
           📱 Personal
@@ -185,9 +145,7 @@ export default function WhatsAppClient({
           type="button"
           onClick={() => setProvider("meta")}
           className={`flex-1 py-2 text-sm font-medium rounded-lg transition-colors ${
-            provider === "meta"
-              ? "bg-white text-gray-900 shadow-sm"
-              : "text-gray-500 hover:text-gray-700"
+            provider === "meta" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
           }`}
         >
           💼 Business
@@ -197,96 +155,151 @@ export default function WhatsAppClient({
       {/* ── PERSONAL (Evolution API) ── */}
       {provider === "evolution" && (
         <div className="space-y-4">
-          <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3">
-            Conecta un número personal de WhatsApp escaneando un QR. No requiere cuenta Business.
-          </div>
+          {/* Connection status banner */}
+          <StatusBanner status={qrStatus} onRefresh={handleRefreshStatus} isPending={isPending} />
 
-          {qrStatus === "idle" && (
-            <div className="bg-white rounded-2xl border border-gray-200 p-8 flex flex-col items-center gap-4">
-              <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center text-3xl">
-                📱
+          {/* ══ DISCONNECTED VIEW: focus on linking the number ══ */}
+          {!isConnected && qrStatus !== "checking" && (
+            <>
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                Vinculá un número de WhatsApp escaneando un QR, igual que WhatsApp Web. No requiere cuenta Business.
               </div>
-              <div className="text-center">
-                <p className="font-medium text-gray-900 mb-1">Sin conectar</p>
-                <p className="text-sm text-gray-500">
-                  Al presionar el botón se genera el código QR para vincular el número.
-                </p>
-              </div>
-              <button
-                onClick={handleGetQr}
-                className="mt-2 w-full py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition-colors"
-              >
-                Obtener QR
-              </button>
-            </div>
+
+              {qrStatus === "idle" && (
+                <div className="bg-white rounded-2xl border border-gray-200 p-8 flex flex-col items-center gap-4">
+                  <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center text-3xl">📱</div>
+                  <div className="text-center">
+                    <p className="font-medium text-gray-900 mb-1">Número sin vincular</p>
+                    <p className="text-sm text-gray-500">Generá el código QR para vincular el WhatsApp del negocio.</p>
+                  </div>
+                  <button
+                    onClick={handleGetQr}
+                    className="mt-2 w-full py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition-colors"
+                  >
+                    Obtener QR
+                  </button>
+                </div>
+              )}
+
+              {qrStatus === "loading" && (
+                <div className="bg-white rounded-2xl border border-gray-200 p-8 flex flex-col items-center gap-4">
+                  <Spinner />
+                  <p className="text-sm text-gray-500 text-center">
+                    Generando QR… puede tardar unos segundos si el servidor está iniciando.
+                  </p>
+                </div>
+              )}
+
+              {qrStatus === "qr" && qr && (
+                <div className="bg-white rounded-2xl border border-gray-200 p-6 flex flex-col items-center gap-4">
+                  <p className="text-sm text-gray-700 text-center">
+                    Abrí WhatsApp → <strong>Dispositivos vinculados</strong> → <strong>Vincular dispositivo</strong>
+                  </p>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={qr.startsWith("data:") ? qr : `data:image/png;base64,${qr}`}
+                    alt="QR WhatsApp"
+                    className="w-64 h-64 rounded-xl border border-gray-100"
+                  />
+                  <div className="flex items-center gap-2 text-xs text-gray-400">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    Esperando escaneo… el QR se renueva solo.
+                  </div>
+                  <button onClick={handleGetQr} disabled={isPending} className="text-sm text-green-600 hover:underline disabled:opacity-50">
+                    Generar nuevo QR
+                  </button>
+                </div>
+              )}
+
+              {qrStatus === "error" && (
+                <div className="bg-white rounded-2xl border border-gray-200 p-8 flex flex-col items-center gap-4">
+                  <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center text-3xl">⚠️</div>
+                  <div className="text-center">
+                    <p className="font-medium text-gray-900 mb-1">No se pudo conectar</p>
+                    <p className="text-sm text-red-600">{qrError}</p>
+                  </div>
+                  <button
+                    onClick={handleGetQr}
+                    disabled={isPending}
+                    className="mt-2 w-full py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors"
+                  >
+                    Reintentar
+                  </button>
+                </div>
+              )}
+            </>
           )}
 
-          {qrStatus === "loading" && (
-            <div className="bg-white rounded-2xl border border-gray-200 p-8 flex flex-col items-center gap-4">
-              <svg className="animate-spin w-10 h-10 text-green-600" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-              </svg>
-              <p className="text-sm text-gray-500 text-center">
-                Generando QR… puede tardar unos segundos si el servidor está iniciando.
-              </p>
-            </div>
-          )}
+          {/* ══ CONNECTED VIEW: bot controls ══ */}
+          {isConnected && (
+            <>
+              {/* Bot on/off */}
+              <form action={botAction} className={`rounded-xl border p-4 ${botEnabled ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
+                <input type="hidden" name="tenant_id" value={tenantId} />
+                <input type="hidden" name="enabled" value={botEnabled ? "false" : "true"} />
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className={`text-sm font-semibold ${botEnabled ? "text-green-900" : "text-red-900"}`}>
+                      Bot {botEnabled ? "activo" : "pausado"}
+                    </p>
+                    <p className={`text-xs ${botEnabled ? "text-green-700" : "text-red-700"}`}>
+                      {botEnabled
+                        ? "Responde automáticamente los mensajes entrantes."
+                        : "Guarda mensajes, pero no responde automáticamente."}
+                    </p>
+                  </div>
+                  <button
+                    type="submit"
+                    className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors ${
+                      botEnabled ? "bg-red-600 hover:bg-red-700" : "bg-green-600 hover:bg-green-700"
+                    }`}
+                  >
+                    {botEnabled ? "Pausar" : "Activar"}
+                  </button>
+                </div>
+                {botState?.error && <p className="mt-2 text-xs text-red-600">{botState.error}</p>}
+              </form>
 
-          {qrStatus === "qr" && qr && (
-            <div className="bg-white rounded-2xl border border-gray-200 p-6 flex flex-col items-center gap-4">
-              <p className="text-sm text-gray-700 text-center">
-                Abrí WhatsApp → <strong>Dispositivos vinculados</strong> → <strong>Vincular dispositivo</strong>
-              </p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={qr.startsWith("data:") ? qr : `data:image/png;base64,${qr}`}
-                alt="QR WhatsApp"
-                className="w-64 h-64 rounded-xl border border-gray-100"
-              />
-              <p className="text-xs text-gray-400">El QR expira en ~60 segundos.</p>
-              <button
-                onClick={handleGetQr}
-                disabled={isPending}
-                className="text-sm text-green-600 hover:underline disabled:opacity-50"
-              >
-                Generar nuevo QR
-              </button>
-            </div>
-          )}
+              {/* Forget command */}
+              <form action={forgetAction} className="rounded-xl border border-gray-200 bg-white p-4">
+                <input type="hidden" name="tenant_id" value={tenantId} />
+                <input type="hidden" name="enabled" value={forgetEnabled ? "false" : "true"} />
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">Comando &quot;Olvidar&quot;</p>
+                    <p className="text-xs text-gray-500">
+                      Permite que el cliente escriba &quot;olvidate&quot; o &quot;empezar de nuevo&quot; para reiniciar la conversación.
+                    </p>
+                  </div>
+                  <button
+                    type="submit"
+                    role="switch"
+                    aria-checked={forgetEnabled}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                      forgetEnabled ? "bg-green-600" : "bg-gray-300"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                        forgetEnabled ? "translate-x-5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </label>
+                {forgetState?.error && <p className="mt-2 text-xs text-red-600">{forgetState.error}</p>}
+              </form>
 
-          {qrStatus === "connected" && (
-            <div className="bg-white rounded-2xl border border-green-200 p-8 flex flex-col items-center gap-4">
-              <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center text-3xl">✅</div>
-              <div className="text-center">
-                <p className="font-semibold text-green-800 mb-1">WhatsApp conectado</p>
-                <p className="text-sm text-gray-500">El número está vinculado y el bot puede operar.</p>
+              {/* Disconnect */}
+              <div className="pt-2 text-center">
+                <button
+                  onClick={handleDisconnect}
+                  disabled={isPending}
+                  className="text-sm text-gray-400 hover:text-red-600 disabled:opacity-50 transition-colors"
+                >
+                  Desconectar este número
+                </button>
               </div>
-              <button
-                onClick={handleGetQr}
-                disabled={isPending}
-                className="text-sm text-gray-400 hover:text-gray-600 disabled:opacity-50"
-              >
-                Reconectar
-              </button>
-            </div>
-          )}
-
-          {qrStatus === "error" && (
-            <div className="bg-white rounded-2xl border border-gray-200 p-8 flex flex-col items-center gap-4">
-              <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center text-3xl">⚠️</div>
-              <div className="text-center">
-                <p className="font-medium text-gray-900 mb-1">No se pudo conectar</p>
-                <p className="text-sm text-red-600">{qrError}</p>
-              </div>
-              <button
-                onClick={handleGetQr}
-                disabled={isPending}
-                className="mt-2 w-full py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors"
-              >
-                Reintentar
-              </button>
-            </div>
+            </>
           )}
         </div>
       )}
@@ -304,26 +317,19 @@ export default function WhatsAppClient({
           {metaState?.error && <Alert type="error" message={metaState.error} />}
           {metaState?.ok && <Alert type="success" message="Configuración guardada." />}
 
-          <Field name="meta_phone_number_id" label="Phone Number ID" placeholder="123456789012345"
-            defaultValue={initialConfig?.meta_phone_number_id ?? ""} />
-          <Field name="meta_access_token" label="Access Token" type="password" placeholder="EAABsbCS..."
-            defaultValue={initialConfig?.meta_access_token ?? ""} />
-          <Field name="meta_verify_token" label="Verify Token" placeholder="un-token-secreto"
-            defaultValue={initialConfig?.meta_verify_token ?? ""} />
-          <Field name="meta_app_secret" label="App Secret" type="password" placeholder="abc123..."
-            defaultValue={initialConfig?.meta_app_secret ?? ""} />
-          <Field name="meta_business_id" label="Business Account ID" placeholder="987654321"
-            defaultValue={initialConfig?.meta_business_id ?? ""} />
+          <Field name="meta_phone_number_id" label="Phone Number ID" placeholder="123456789012345" defaultValue={initialConfig?.meta_phone_number_id ?? ""} />
+          <Field name="meta_access_token" label="Access Token" type="password" placeholder="EAABsbCS..." defaultValue={initialConfig?.meta_access_token ?? ""} />
+          <Field name="meta_verify_token" label="Verify Token" placeholder="un-token-secreto" defaultValue={initialConfig?.meta_verify_token ?? ""} />
+          <Field name="meta_app_secret" label="App Secret" type="password" placeholder="abc123..." defaultValue={initialConfig?.meta_app_secret ?? ""} />
+          <Field name="meta_business_id" label="Business Account ID" placeholder="987654321" defaultValue={initialConfig?.meta_business_id ?? ""} />
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Webhook URL</label>
             <div className="flex items-center gap-2">
-              <code className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-700 break-all">
-                {webhookUrl}
-              </code>
+              <code className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-700 break-all">{WEBHOOK_URL}</code>
               <button
                 type="button"
-                onClick={() => navigator.clipboard.writeText(webhookUrl)}
+                onClick={() => navigator.clipboard.writeText(WEBHOOK_URL)}
                 className="px-3 py-2 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 whitespace-nowrap"
               >
                 Copiar
@@ -340,6 +346,47 @@ export default function WhatsAppClient({
         </form>
       )}
     </div>
+  );
+}
+
+function StatusBanner({ status, onRefresh, isPending }: { status: QrStatus; onRefresh: () => void; isPending: boolean }) {
+  if (status === "checking") {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 flex items-center gap-3">
+        <Spinner small />
+        <span className="text-sm text-gray-500">Verificando conexión…</span>
+      </div>
+    );
+  }
+
+  const connected = status === "connected";
+  return (
+    <div className={`rounded-xl border p-4 flex items-center justify-between gap-3 ${connected ? "bg-green-50 border-green-200" : "bg-gray-50 border-gray-200"}`}>
+      <div className="flex items-center gap-3">
+        <span className={`w-2.5 h-2.5 rounded-full ${connected ? "bg-green-500" : "bg-gray-400"}`} />
+        <div>
+          <p className={`text-sm font-semibold ${connected ? "text-green-900" : "text-gray-700"}`}>
+            {connected ? "WhatsApp conectado" : "WhatsApp sin conectar"}
+          </p>
+          <p className={`text-xs ${connected ? "text-green-700" : "text-gray-500"}`}>
+            {connected ? "El número está vinculado y el bot puede operar." : "Vinculá un número para que el bot funcione."}
+          </p>
+        </div>
+      </div>
+      <button onClick={onRefresh} disabled={isPending} className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-50 whitespace-nowrap">
+        Actualizar
+      </button>
+    </div>
+  );
+}
+
+function Spinner({ small }: { small?: boolean }) {
+  const size = small ? "w-5 h-5" : "w-10 h-10";
+  return (
+    <svg className={`animate-spin ${size} text-green-600`} fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+    </svg>
   );
 }
 

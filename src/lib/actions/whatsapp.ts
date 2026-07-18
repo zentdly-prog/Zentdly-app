@@ -135,7 +135,8 @@ export async function connectEvolutionWhatsApp(
     );
 
     // Configure Evolution webhook to point to our endpoint
-    const webhookUrl = `${process.env.APP_URL}/api/webhooks/whatsapp`;
+    const appUrl = (process.env.APP_URL ?? "https://zentdly-three.vercel.app").replace(/\/$/, "");
+    const webhookUrl = `${appUrl}/api/webhooks/whatsapp`;
     await fetch(`${evolutionUrl}/webhook/set/${instanceName}`, {
       method: "POST",
       headers: { apikey: evolutionKey, "Content-Type": "application/json" },
@@ -195,7 +196,7 @@ export async function getEvolutionQR(tenantId: string): Promise<{ qr?: string; c
   return connectEvolutionWhatsApp(tenantId);
 }
 
-export async function checkEvolutionConnection(tenantId: string): Promise<{ connected: boolean }> {
+export async function checkEvolutionConnection(tenantId: string): Promise<{ connected: boolean; state?: string }> {
   try {
     const db = createServerClient();
     const { url: evolutionUrl, key: evolutionKey } = getEvolutionConfig();
@@ -214,9 +215,35 @@ export async function checkEvolutionConnection(tenantId: string): Promise<{ conn
 
     if (!res?.ok) return { connected: false };
     const json = await res.json().catch(() => ({}));
-    return { connected: json?.instance?.state === "open" };
+    const state = json?.instance?.state as string | undefined;
+    return { connected: state === "open", state };
   } catch {
     return { connected: false };
+  }
+}
+
+export async function disconnectEvolutionWhatsApp(tenantId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const db = createServerClient();
+    const { url: evolutionUrl, key: evolutionKey } = getEvolutionConfig();
+    const { data: tenant } = await db
+      .from("tenants")
+      .select("slug")
+      .eq("id", tenantId)
+      .single();
+
+    if (!tenant?.slug) return { ok: false, error: "No se encontró el negocio." };
+
+    // Logout unlinks the phone but keeps the instance (so we can re-scan a QR without recreating)
+    await fetch(`${evolutionUrl}/instance/logout/${tenant.slug}`, {
+      method: "DELETE",
+      headers: { apikey: evolutionKey },
+    }).catch(() => null);
+
+    revalidatePath(`/tenants/${tenantId}/whatsapp`);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Error al desconectar." };
   }
 }
 

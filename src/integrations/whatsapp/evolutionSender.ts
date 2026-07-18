@@ -1,4 +1,4 @@
-const BASE_URL = process.env.EVOLUTION_API_URL ?? "https://evolution-api-production-be7b.up.railway.app";
+const BASE_URL = (process.env.EVOLUTION_API_URL ?? "https://evolution-api-production-6fab.up.railway.app").replace(/\/$/, "");
 const API_KEY = process.env.EVOLUTION_API_KEY ?? "";
 
 export async function evolutionSendText(instanceName: string, to: string, text: string): Promise<void> {

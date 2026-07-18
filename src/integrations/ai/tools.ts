@@ -303,6 +303,12 @@ export async function executeTool(
       const { sendHumanSupportAlert } = await import("@/integrations/email/resendSender");
       const reason = String(args.reason || "Usuario solicitó ayuda");
 
+      // Mark conversation as requiring human attention
+      await deps.db
+        .from("conversations")
+        .update({ requires_human: true, human_reason: reason, bot_paused: true })
+        .eq("id", deps.conversationId);
+
       // Fetch tenant's contact email
       const { data: tenant } = await deps.db
         .from("tenants")
@@ -310,23 +316,19 @@ export async function executeTool(
         .eq("id", deps.tenantId)
         .single();
 
-      if (!tenant?.contact_email) {
-        return "El negocio no tiene email de contacto configurado. Decile al cliente que te escriba por WhatsApp y se lo vas a pasar al equipo manualmente.";
+      if (tenant?.contact_email) {
+        const mailResult = await sendHumanSupportAlert(
+          tenant.contact_email,
+          tenant.name as string,
+          deps.customerPhone,
+          reason,
+        );
+        if (!mailResult.ok) {
+          console.warn("[agent] Failed to send support alert:", mailResult.error);
+        }
       }
 
-      // Send email to business owner
-      const mailResult = await sendHumanSupportAlert(
-        tenant.contact_email,
-        tenant.name as string,
-        deps.customerPhone,
-        reason,
-      );
-
-      if (!mailResult.ok) {
-        console.warn("[agent] Failed to send support alert:", mailResult.error);
-      }
-
-      return "Entendido. Le avisé al equipo del complejo que te contacte. Mientras tanto, deja que te siga ayudando con lo que necesites. 🙌";
+      return "Entendido. Le avisé al equipo del complejo que te contacte a la brevedad. 🙌";
     }
 
     default:
