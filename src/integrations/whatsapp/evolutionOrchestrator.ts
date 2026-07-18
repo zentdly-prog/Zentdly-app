@@ -123,6 +123,13 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
     raw_payload: { messageId: msg.messageId, jid: msg.jid, messageType: msg.messageType ?? "text" },
   });
 
+  // Bump activity time the moment the customer writes so the inbox re-orders
+  // this conversation to the top immediately — not only once the bot replies.
+  await db
+    .from("conversations")
+    .update({ last_message_at: new Date().toISOString() })
+    .eq("id", conversation.id);
+
   await logAgentEvent(db, {
     tenantId,
     conversationId: conversation.id,
@@ -132,10 +139,6 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   });
 
   if (config.connected === false || conversationControl.botPaused || conversationControl.requiresHuman) {
-    await db
-      .from("conversations")
-      .update({ last_message_at: new Date().toISOString() })
-      .eq("id", conversation.id);
     return;
   }
 
