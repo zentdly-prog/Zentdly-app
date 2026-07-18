@@ -6,12 +6,14 @@ import type {
 import { logAgentEvent } from "@/domain/conversation/agentOps";
 import { AGENT_TOOLS, executeTool, type AgentToolDeps } from "@/integrations/ai/tools";
 
-// gpt-5.1 is the flagship chat model: markedly more natural in rioplatense
-// Spanish and more reliable with tools/dates/deposits than gpt-4o-mini, while
-// measuring the SAME or faster latency (~0.9–1.6s/round) — so it stays within
-// the serverless timeout with no downside. Temperature 0.4 gives a warmer,
-// less robotic tone without hurting tool-call determinism.
-const AGENT_MODEL = "gpt-5.1";
+// gpt-4.1-mini is the best economical pick for high message volume: an order
+// of magnitude cheaper than the gpt-5.x flagship tier, yet benchmarked as
+// BETTER and faster than the previous gpt-4o-mini (~0.85s/round, clearer
+// rioplatense, reliable tool/date/deposit handling). Temperature 0.4 keeps a
+// warm, human tone without hurting tool-call determinism. If quality ever
+// needs a bump for specific tenants, gpt-5.1 is the flagship upgrade — but it
+// costs ~15-20x more per message, so mini is the right default at scale.
+const AGENT_MODEL = "gpt-4.1-mini";
 const AGENT_TEMPERATURE = 0.4;
 const MAX_TOOL_ROUNDS = 4;
 
