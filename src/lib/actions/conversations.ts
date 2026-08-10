@@ -55,6 +55,50 @@ export async function getHumanQueue(tenantId: string) {
   }
 }
 
+/**
+ * Signature of the human-support queue: just a count plus the newest id.
+ * Polled frequently from the nav badge, so it must stay tiny — fetching the
+ * full queue on every tick is what makes idle panels burn egress quota.
+ */
+export async function getHumanQueueSignature(
+  tenantId: string,
+): Promise<{ count: number; newestId: string | null }> {
+  try {
+    const db = createServerClient();
+    const { data, count } = await db
+      .from("conversations")
+      .select("id", { count: "exact" })
+      .eq("tenant_id", tenantId)
+      .eq("requires_human", true)
+      .order("last_message_at", { ascending: false })
+      .limit(1);
+    return { count: count ?? 0, newestId: data?.[0]?.id ?? null };
+  } catch {
+    return { count: 0, newestId: null };
+  }
+}
+
+/**
+ * Cheap change-detector for the inbox: the newest activity timestamp and the
+ * row count. The client only refetches the full list when this changes.
+ */
+export async function getConversationsSignature(
+  tenantId: string,
+): Promise<{ count: number; latest: string | null }> {
+  try {
+    const db = createServerClient();
+    const { data, count } = await db
+      .from("conversations")
+      .select("last_message_at", { count: "exact" })
+      .eq("tenant_id", tenantId)
+      .order("last_message_at", { ascending: false })
+      .limit(1);
+    return { count: count ?? 0, latest: data?.[0]?.last_message_at ?? null };
+  } catch {
+    return { count: 0, latest: null };
+  }
+}
+
 export async function getConversationMessages(conversationId: string) {
   try {
     const db = createServerClient();

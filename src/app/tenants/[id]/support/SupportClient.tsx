@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState, useTransition } from "react";
+import { useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { updateConversationControl, getHumanQueue } from "@/lib/actions/conversations";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 import { Alert } from "@/components/Alert";
 
 type CustomerRelation = { name: string | null; phone_e164: string | null } | { name: string | null; phone_e164: string | null }[] | null;
@@ -31,22 +32,16 @@ export default function SupportClient({
   const [, startTransition] = useTransition();
   const lastActionAt = useRef(0);
 
-  useEffect(() => {
-    let active = true;
-    const poll = () => {
-      startTransition(async () => {
-        const fresh = await getHumanQueue(tenantId);
-        // Avoid clobbering the list right after the user marks one attended
-        if (!active || Date.now() - lastActionAt.current < 1500) return;
-        setQueue(fresh);
-      });
-    };
-    const interval = setInterval(poll, 10_000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
+  const poll = useCallback(() => {
+    startTransition(async () => {
+      const fresh = await getHumanQueue(tenantId);
+      // Avoid clobbering the list right after the user marks one attended
+      if (Date.now() - lastActionAt.current < 1500) return;
+      setQueue(fresh);
+    });
   }, [tenantId]);
+
+  useVisiblePolling(poll, 15_000);
 
   // When the "Atendido" action succeeds, drop it from the local list immediately
   useEffect(() => {

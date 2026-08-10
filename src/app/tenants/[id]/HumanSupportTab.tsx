@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
-import { getHumanQueue } from "@/lib/actions/conversations";
+import { useCallback, useRef, useState } from "react";
+import { getHumanQueueSignature } from "@/lib/actions/conversations";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 
 function playPling() {
   try {
@@ -36,28 +37,19 @@ export default function HumanSupportTab({
   initialIds: string[];
 }) {
   const [count, setCount] = useState(initialCount);
-  const seen = useRef(new Set(initialIds));
+  // Track the newest queued conversation, not the whole set: this badge renders
+  // on every page, so its poll must stay as small as possible.
+  const newestId = useRef<string | null>(initialIds[0] ?? null);
 
-  useEffect(() => {
-    let active = true;
-
-    const poll = async () => {
-      const queue = await getHumanQueue(tenantId);
-      if (!active) return;
-      const currentIds = queue.map((c) => c.id);
-      const hasNew = currentIds.some((id) => !seen.current.has(id));
-      if (hasNew) playPling();
-      // Keep `seen` in sync with the live queue so resolved+re-requested conversations ping again.
-      seen.current = new Set(currentIds);
-      setCount(queue.length);
-    };
-
-    const interval = setInterval(poll, 12_000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
+  const poll = useCallback(async () => {
+    const { count: queueCount, newestId: latest } = await getHumanQueueSignature(tenantId);
+    // Ping only when someone new reaches the front of the queue.
+    if (latest && latest !== newestId.current) playPling();
+    newestId.current = latest;
+    setCount(queueCount);
   }, [tenantId]);
+
+  useVisiblePolling(poll, 20_000);
 
   const active = count > 0;
 

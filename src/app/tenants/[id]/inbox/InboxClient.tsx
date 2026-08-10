@@ -1,7 +1,12 @@
 "use client";
 
-import { useActionState, useEffect, useState, useTransition } from "react";
-import { updateConversationControl, getTenantConversations } from "@/lib/actions/conversations";
+import { useActionState, useCallback, useEffect, useRef, useState, useTransition } from "react";
+import {
+  updateConversationControl,
+  getTenantConversations,
+  getConversationsSignature,
+} from "@/lib/actions/conversations";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 import { Alert } from "@/components/Alert";
 
 type CustomerRelation = { name: string | null; phone_e164: string | null } | { name: string | null; phone_e164: string | null }[] | null;
@@ -22,8 +27,8 @@ function one<T>(value: T | T[] | null | undefined): T | null {
   return Array.isArray(value) ? (value[0] ?? null) : value;
 }
 
-function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
+function relativeTime(iso: string, now: number): string {
+  const diff = now - new Date(iso).getTime();
   const s = Math.round(diff / 1000);
   if (s < 60) return "hace un momento";
   const m = Math.round(s / 60);
@@ -51,28 +56,33 @@ export default function InboxClient({
 }) {
   const [state, action] = useActionState(updateConversationControl, null);
   const [conversations, setConversations] = useState<Conversation[]>(sortByRecency(initial));
-  const [tick, setTick] = useState(0); // forces relative-time labels to refresh
+  // Rendering reads "now" from state rather than calling Date.now() inline, so
+  // relative labels stay pure and refresh on a predictable tick.
+  const [now, setNow] = useState(() => Date.now());
   const [, startTransition] = useTransition();
 
-  // Live refresh: pull the latest conversations and re-order every few seconds.
-  useEffect(() => {
-    let active = true;
-    const poll = () => {
-      startTransition(async () => {
-        const fresh = await getTenantConversations(tenantId);
-        if (active) setConversations(sortByRecency(fresh as Conversation[]));
-      });
-    };
-    const interval = setInterval(poll, 6_000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
+  // Remember what we last rendered so a poll that finds nothing new costs
+  // only the tiny signature query instead of the full conversation list.
+  const signature = useRef<string>(
+    `${initial.length}|${sortByRecency(initial)[0]?.last_message_at ?? ""}`,
+  );
+
+  const poll = useCallback(() => {
+    startTransition(async () => {
+      const sig = await getConversationsSignature(tenantId);
+      const key = `${sig.count}|${sig.latest ?? ""}`;
+      if (key === signature.current) return; // nothing changed — skip the big fetch
+      signature.current = key;
+      const fresh = await getTenantConversations(tenantId);
+      setConversations(sortByRecency(fresh as Conversation[]));
+    });
   }, [tenantId]);
+
+  useVisiblePolling(poll, 8_000);
 
   // Keep the "hace X min" labels fresh without a network call.
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 30_000);
+    const t = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(t);
   }, []);
 
@@ -91,7 +101,7 @@ export default function InboxClient({
       {state?.error && <Alert type="error" message={state.error} />}
       {state?.ok && <Alert type="success" message="Conversación actualizada." />}
 
-      <div className="space-y-3" data-tick={tick}>
+      <div className="space-y-3">
         {conversations.length === 0 && (
           <div className="bg-white rounded-xl border border-gray-200 p-8 text-sm text-gray-500">
             Todavía no hay conversaciones.
@@ -102,7 +112,7 @@ export default function InboxClient({
           const customer = one(conversation.customers);
           const displayName = customer?.name || customer?.phone_e164 || conversation.external_chat_id;
           const isMostRecent = conversation.id === topId;
-          const fresh = Date.now() - new Date(conversation.last_message_at).getTime() < 60_000;
+          const fresh = now - new Date(conversation.last_message_at).getTime() < 60_000;
 
           return (
             <div
@@ -118,7 +128,7 @@ export default function InboxClient({
                     <span className="font-medium text-gray-900">{displayName}</span>
                   </div>
                   <div className="text-xs text-gray-400 mt-0.5">
-                    Último mensaje: {relativeTime(conversation.last_message_at)}
+                    Último mensaje: {relativeTime(conversation.last_message_at, now)}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2 text-xs">
                     {conversation.bot_paused && <Badge label="Bot pausado" tone="gray" />}
