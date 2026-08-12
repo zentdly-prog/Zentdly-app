@@ -88,17 +88,17 @@ export default function WhatsAppClient({
   const botEnabled = botState?.enabled ?? initialConfig?.bot_enabled ?? true;
   const forgetEnabled = forgetState?.enabled ?? initialConfig?.forget_command_enabled ?? true;
 
-  function handleGetQr() {
+  function handleGetQr(forceNew = false) {
     setQr(null);
     setQrError(null);
     setQrStatus("loading");
     startTransition(async () => {
-      const res = await connectEvolutionWhatsApp(tenantId);
-      if (res.connected) {
-        setQrStatus("connected");
-      } else if (res.qr) {
+      const res = await connectEvolutionWhatsApp(tenantId, { forceNew });
+      if (res.qr) {
         setQr(res.qr);
         setQrStatus("qr");
+      } else if (res.connected) {
+        setQrStatus("connected");
       } else {
         setQrError(res.error ?? "Error desconocido.");
         setQrStatus("error");
@@ -106,12 +106,36 @@ export default function WhatsAppClient({
     });
   }
 
+  // Unlink the current phone and immediately show a QR for a different one.
+  function handleLinkAnother() {
+    if (!confirm("Se va a desvincular el número actual para poder vincular otro. ¿Continuar?")) return;
+    setQr(null);
+    setQrError(null);
+    setQrStatus("loading");
+    startTransition(async () => {
+      const res = await connectEvolutionWhatsApp(tenantId, { forceNew: true });
+      if (res.qr) {
+        setQr(res.qr);
+        setQrStatus("qr");
+      } else {
+        setQrError(res.error ?? "No se pudo desvincular el número.");
+        setQrStatus("error");
+      }
+    });
+  }
+
   function handleDisconnect() {
     if (!confirm("¿Seguro que querés desconectar este WhatsApp? El bot dejará de recibir mensajes hasta que vuelvas a vincular un número.")) return;
+    setQrStatus("loading");
     startTransition(async () => {
-      await disconnectEvolutionWhatsApp(tenantId);
-      setQrStatus("idle");
-      setQr(null);
+      const res = await disconnectEvolutionWhatsApp(tenantId);
+      if (res.ok) {
+        setQrStatus("idle");
+        setQr(null);
+      } else {
+        setQrError(res.error ?? "No se pudo desconectar.");
+        setQrStatus("error");
+      }
     });
   }
 
@@ -173,7 +197,7 @@ export default function WhatsAppClient({
                     <p className="text-sm text-gray-500">Generá el código QR para vincular el WhatsApp del negocio.</p>
                   </div>
                   <button
-                    onClick={handleGetQr}
+                    onClick={() => handleGetQr()}
                     className="mt-2 w-full py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 transition-colors"
                   >
                     Obtener QR
@@ -205,7 +229,7 @@ export default function WhatsAppClient({
                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                     Esperando escaneo… el QR se renueva solo.
                   </div>
-                  <button onClick={handleGetQr} disabled={isPending} className="text-sm text-green-600 hover:underline disabled:opacity-50">
+                  <button onClick={() => handleGetQr()} disabled={isPending} className="text-sm text-green-600 hover:underline disabled:opacity-50">
                     Generar nuevo QR
                   </button>
                 </div>
@@ -219,7 +243,7 @@ export default function WhatsAppClient({
                     <p className="text-sm text-red-600">{qrError}</p>
                   </div>
                   <button
-                    onClick={handleGetQr}
+                    onClick={() => handleGetQr()}
                     disabled={isPending}
                     className="mt-2 w-full py-3 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors"
                   >
@@ -289,15 +313,24 @@ export default function WhatsAppClient({
                 {forgetState?.error && <p className="mt-2 text-xs text-red-600">{forgetState.error}</p>}
               </form>
 
-              {/* Disconnect */}
-              <div className="pt-2 text-center">
+              {/* Change / remove the linked number */}
+              <div className="pt-2 space-y-3">
                 <button
-                  onClick={handleDisconnect}
+                  onClick={handleLinkAnother}
                   disabled={isPending}
-                  className="text-sm text-gray-400 hover:text-red-600 disabled:opacity-50 transition-colors"
+                  className="w-full py-2.5 rounded-xl border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
                 >
-                  Desconectar este número
+                  Vincular otro número
                 </button>
+                <div className="text-center">
+                  <button
+                    onClick={handleDisconnect}
+                    disabled={isPending}
+                    className="text-sm text-gray-400 hover:text-red-600 disabled:opacity-50 transition-colors"
+                  >
+                    Desconectar este número
+                  </button>
+                </div>
               </div>
             </>
           )}
