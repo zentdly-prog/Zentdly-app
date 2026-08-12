@@ -170,31 +170,35 @@ async function unlinkInstance(
   evolutionUrl: string,
   evolutionKey: string,
   instanceName: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<boolean> {
   await fetch(`${evolutionUrl}/instance/logout/${instanceName}`, {
     method: "DELETE",
     headers: { apikey: evolutionKey },
   }).catch(() => null);
 
-  // Give the socket a few seconds to actually drop.
-  for (let attempt = 0; attempt < 6; attempt++) {
+  // Give the socket a couple of seconds to actually drop.
+  for (let attempt = 0; attempt < 3; attempt++) {
     const state = await readInstanceState(evolutionUrl, evolutionKey, instanceName);
-    if (state !== "open") return { ok: true };
+    if (state !== "open") return true;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
-  // Still linked — discard the instance so a fresh QR can be issued.
-  const deleteRes = await fetch(`${evolutionUrl}/instance/delete/${instanceName}`, {
-    method: "DELETE",
-    headers: { apikey: evolutionKey },
-  }).catch(() => null);
+  // Still reporting `open`. That state is not trustworthy on its own: Evolution
+  // keeps it in its own database, so a dead socket — or a transient outage of
+  // that database — leaves it stale forever. Discard the instance instead;
+  // it is recreated cleanly when the next QR is requested.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const deleteRes = await fetch(`${evolutionUrl}/instance/delete/${instanceName}`, {
+      method: "DELETE",
+      headers: { apikey: evolutionKey },
+    }).catch(() => null);
 
-  if (deleteRes?.ok) return { ok: true };
+    if (deleteRes?.ok) return true;
+    if ((await readInstanceState(evolutionUrl, evolutionKey, instanceName)) !== "open") return true;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
 
-  const state = await readInstanceState(evolutionUrl, evolutionKey, instanceName);
-  if (state !== "open") return { ok: true };
-
-  return { ok: false, error: "No se pudo desvincular el número. Probá de nuevo en unos segundos." };
+  return false;
 }
 
 export async function connectEvolutionWhatsApp(
@@ -235,8 +239,10 @@ export async function connectEvolutionWhatsApp(
     // short-circuit and drop the current pairing instead — otherwise an already
     // linked number makes it impossible to link a new one.
     if (options?.forceNew) {
-      const unlinked = await unlinkInstance(evolutionUrl, evolutionKey, instanceName);
-      if (!unlinked.ok) return { error: unlinked.error };
+      // Best effort: even if Evolution still claims the number is linked, keep
+      // going. What matters is whether we can hand back a QR to scan, and the
+      // create step below discards the stale instance if it comes to that.
+      await unlinkInstance(evolutionUrl, evolutionKey, instanceName);
     } else {
       const state = await readInstanceState(evolutionUrl, evolutionKey, instanceName);
       if (state === "open") {
@@ -252,8 +258,9 @@ export async function connectEvolutionWhatsApp(
 
     if (connectRes?.ok) {
       const connectJson = await connectRes.json().catch(() => ({}));
-      // Already connected (race condition)
-      if (connectJson?.instance?.state === "open") {
+      // Already connected (race condition). Never report this when the operator
+      // asked for a new pairing — that is the dead end we are fixing.
+      if (!options?.forceNew && connectJson?.instance?.state === "open") {
         await ensureWebhook(evolutionUrl, evolutionKey, instanceName);
         return { connected: true };
       }
@@ -262,6 +269,15 @@ export async function connectEvolutionWhatsApp(
         await ensureWebhook(evolutionUrl, evolutionKey, instanceName);
         return { qr };
       }
+    }
+
+    // 2b. Pairing a new phone but the old instance is still holding on —
+    // discard it so the create below starts from a clean slate.
+    if (options?.forceNew) {
+      await fetch(`${evolutionUrl}/instance/delete/${instanceName}`, {
+        method: "DELETE",
+        headers: { apikey: evolutionKey },
+      }).catch(() => null);
     }
 
     // 3. Instance doesn't exist yet (or was just discarded) — create it
@@ -282,7 +298,10 @@ export async function connectEvolutionWhatsApp(
       }
     }
 
-    return { error: "No se pudo obtener el QR. Intentá de nuevo en unos segundos." };
+    return {
+      error:
+        "No se pudo obtener el QR. El servicio de WhatsApp puede estar reiniciándose — esperá un minuto y probá de nuevo.",
+    };
   } catch (e) {
     return { error: e instanceof Error ? e.message : "Error de conexión con Evolution API." };
   }
@@ -333,7 +352,13 @@ export async function disconnectEvolutionWhatsApp(tenantId: string): Promise<{ o
     // Verified unlink: confirms the socket actually dropped, so a follow-up
     // pairing isn't rejected with "already connected".
     const unlinked = await unlinkInstance(evolutionUrl, evolutionKey, tenant.slug);
-    if (!unlinked.ok) return unlinked;
+    if (!unlinked) {
+      return {
+        ok: false,
+        error:
+          "No se pudo desvincular el número. El servicio de WhatsApp puede estar reiniciándose — esperá un minuto y probá de nuevo.",
+      };
+    }
 
     revalidatePath(`/tenants/${tenantId}/whatsapp`);
     return { ok: true };
