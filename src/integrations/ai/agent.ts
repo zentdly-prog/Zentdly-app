@@ -37,15 +37,30 @@ export interface RunAgentInput {
   systemPrompt: string;
   chatHistory: ChatCompletionMessageParam[];
   userMessage: string;
+  /** Data URL of an image the customer just sent, if any (e.g. a payment receipt). */
+  imageDataUrl?: string;
   deps: AgentToolDeps;
 }
 
 export async function runAgent(input: RunAgentInput): Promise<string> {
   const openai = getOpenAIClient();
+
+  // Text-only turns stay text-only: the image parts are attached solely when a
+  // picture actually arrived, so ordinary messages carry no vision cost.
+  const userContent: ChatCompletionMessageParam = input.imageDataUrl
+    ? {
+        role: "user",
+        content: [
+          { type: "text", text: input.userMessage },
+          { type: "image_url", image_url: { url: input.imageDataUrl } },
+        ],
+      }
+    : { role: "user", content: input.userMessage };
+
   const messages: ChatCompletionMessageParam[] = [
     { role: "system", content: input.systemPrompt },
     ...input.chatHistory,
-    { role: "user", content: input.userMessage },
+    userContent,
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {

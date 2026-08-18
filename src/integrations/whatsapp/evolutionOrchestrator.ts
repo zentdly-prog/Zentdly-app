@@ -1,5 +1,6 @@
 import { createServerClient } from "@/infrastructure/supabase/server";
 import { evolutionSendText } from "./evolutionSender";
+import { fetchMediaAsDataUrl } from "./evolutionMedia";
 import { getBotPolicy } from "@/lib/actions/policies";
 import { isForgetCommand, logAgentEvent, resetConversationState } from "@/domain/conversation/agentOps";
 import { runAgent } from "@/integrations/ai/agent";
@@ -204,12 +205,30 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
     ? context.chatHistory.slice(0, -1)
     : context.chatHistory;
 
+  // Pull the actual picture when the customer sent one. Without this the agent
+  // only sees the literal text "[image]" and has to guess what it was.
+  let imageDataUrl: string | undefined;
+  if (msg.messageType === "image" || msg.messageType === "document") {
+    const media = await fetchMediaAsDataUrl(msg.instanceName, msg.messageId);
+    if (media) {
+      imageDataUrl = media.dataUrl;
+      await logAgentEvent(db, {
+        tenantId,
+        conversationId: conversation.id,
+        customerId: customer.id,
+        eventType: "image_received",
+        payload: { mimetype: media.mimetype },
+      });
+    }
+  }
+
   let reply: string;
   try {
     reply = await runAgent({
       systemPrompt: context.systemPrompt,
       chatHistory: priorHistory,
       userMessage: msg.text,
+      imageDataUrl,
       deps: {
         db,
         tenantId,
