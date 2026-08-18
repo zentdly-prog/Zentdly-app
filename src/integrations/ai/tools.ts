@@ -7,6 +7,7 @@ import {
 import { computeDepositAmount, formatMoney } from "@/domain/booking/reservationRules";
 import { getBotPolicy } from "@/lib/actions/policies";
 import { importCalendarEventsThrottled } from "@/integrations/google/calendarImporter";
+import { logAgentEvent } from "@/domain/conversation/agentOps";
 
 export interface AgentToolDeps {
   db: SupabaseClient;
@@ -303,30 +304,43 @@ export async function executeTool(
       const { sendHumanSupportAlert } = await import("@/integrations/email/resendSender");
       const reason = String(args.reason || "Usuario solicitó ayuda");
 
-      // Mark conversation as requiring human attention
-      await deps.db
+      // The panel queue is the reliable channel: it works with no external
+      // dependency, so it is written first and never gated on the email.
+      const { error: flagError } = await deps.db
         .from("conversations")
         .update({ requires_human: true, human_reason: reason, bot_paused: true })
         .eq("id", deps.conversationId);
 
-      // Fetch tenant's contact email
       const { data: tenant } = await deps.db
         .from("tenants")
         .select("name, contact_email")
         .eq("id", deps.tenantId)
         .single();
 
-      if (tenant?.contact_email) {
-        const mailResult = await sendHumanSupportAlert(
-          tenant.contact_email,
-          tenant.name as string,
-          deps.customerPhone,
+      const mail = tenant?.contact_email
+        ? await sendHumanSupportAlert(
+            tenant.contact_email,
+            (tenant.name as string) ?? "el complejo",
+            deps.customerPhone,
+            reason,
+          )
+        : { ok: false, error: "El negocio no tiene email de contacto cargado." };
+
+      // Record the outcome so a silent email failure is visible in the panel
+      // instead of disappearing into the logs.
+      await logAgentEvent(deps.db, {
+        tenantId: deps.tenantId,
+        conversationId: deps.conversationId,
+        customerId: deps.customerId,
+        eventType: "human_support_requested",
+        payload: {
           reason,
-        );
-        if (!mailResult.ok) {
-          console.warn("[agent] Failed to send support alert:", mailResult.error);
-        }
-      }
+          queued: !flagError,
+          emailSent: mail.ok,
+          emailError: mail.ok ? undefined : mail.error,
+        },
+        error: flagError?.message,
+      });
 
       return "Entendido. Le avisé al equipo del complejo que te contacte a la brevedad. 🙌";
     }

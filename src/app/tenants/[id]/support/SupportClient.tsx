@@ -23,9 +23,11 @@ function one<T>(value: T | T[] | null | undefined): T | null {
 export default function SupportClient({
   tenantId,
   initialQueue,
+  contactEmail,
 }: {
   tenantId: string;
   initialQueue: QueueItem[];
+  contactEmail?: string | null;
 }) {
   const [state, action] = useActionState(updateConversationControl, null);
   const [queue, setQueue] = useState<QueueItem[]>(initialQueue);
@@ -64,6 +66,20 @@ export default function SupportClient({
           Clientes que pidieron hablar con una persona. El bot queda pausado con ellos hasta que los marques como atendidos.
         </p>
       </div>
+
+      {!contactEmail && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-900">Falta el email de contacto</p>
+          <p className="mt-1 text-xs text-amber-800">
+            Este negocio no tiene email cargado, así que no se envía aviso cuando un cliente pide una
+            persona. Igual aparece acá, con sonido y el contador en la pestaña.{" "}
+            <a href={`/tenants/${tenantId}`} className="font-medium underline">
+              Cargalo en General
+            </a>
+            .
+          </p>
+        </div>
+      )}
 
       {state?.error && <Alert type="error" message={state.error} />}
 
