@@ -340,6 +340,7 @@ export async function executeTool(
           queued: !flagError,
           emailSent: mail.ok,
           emailError: mail.ok ? undefined : mail.error,
+          emailVia: mail.via,
         },
         error: flagError?.message,
       });
