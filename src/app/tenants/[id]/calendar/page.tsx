@@ -103,6 +103,10 @@ export default async function CalendarPage({
           <span className="inline-block h-3 w-3 rounded bg-red-200 border border-red-300" />
           <span className="text-gray-600">Cancelada</span>
         </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-3 w-3 rounded bg-blue-200 border border-blue-300" />
+          <span className="text-gray-600">Realizada</span>
+        </span>
       </div>
 
       <div className="space-y-4">
