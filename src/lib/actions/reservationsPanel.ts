@@ -110,4 +110,152 @@ export async function updateReservationStatus(formData: FormData): Promise<void>
 
   if (error) return;
   revalidatePath(`/tenants/${parsed.data.tenant_id}/reservations`);
+  revalidatePath(`/tenants/${parsed.data.tenant_id}/calendar`);
+}
+
+/** Court types offered by a business, for the manual reservation form. */
+export async function getTenantCourtOptions(tenantId: string) {
+  try {
+    const db = createServerClient();
+    const { data } = await db
+      .from("court_types")
+      .select("id, sport_name")
+      .eq("tenant_id", tenantId)
+      .eq("active", true)
+      .order("sport_name");
+    return (data ?? []) as Array<{ id: string; sport_name: string }>;
+  } catch {
+    return [];
+  }
+}
+
+const ManualReservationSchema = z.object({
+  tenant_id: z.string().uuid(),
+  customer_name: z.string().min(1),
+  customer_phone: z.string().optional(),
+  sport_name: z.string().min(1),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  time: z.string().regex(/^\d{2}:\d{2}$/),
+  status: z.enum(["pending", "confirmed", "cancelled", "completed"]),
+});
+
+/**
+ * Creates a reservation from the panel.
+ *
+ * Deliberately routed through the same domain service the WhatsApp agent uses,
+ * so slot validation, capacity and court-unit assignment behave identically —
+ * a manual booking can't silently double-book a slot the bot considers taken.
+ */
+export async function createManualReservation(
+  _prev: unknown,
+  formData: FormData,
+): Promise<{ ok?: boolean; error?: string }> {
+  const parsed = ManualReservationSchema.safeParse(Object.fromEntries(formData.entries()));
+  if (!parsed.success) return { error: "Revisá los datos: falta el cliente, la cancha, la fecha o la hora." };
+
+  const { tenant_id, customer_name, customer_phone, sport_name, date, time, status } = parsed.data;
+
+  try {
+    const db = createServerClient();
+
+    const { data: tenant } = await db.from("tenants").select("timezone").eq("id", tenant_id).maybeSingle();
+    const timezone = tenant?.timezone ?? "America/Argentina/Buenos_Aires";
+
+    // Reuse the customer when the phone matches, so panel and WhatsApp
+    // bookings land on the same person instead of creating duplicates.
+    const phone = customer_phone?.trim()
+      ? `+${customer_phone.replace(/[^\d]/g, "")}`
+      : `panel:${customer_name.trim().toLowerCase()}`;
+
+    const { data: customer, error: customerError } = await db
+      .from("customers")
+      .upsert({ tenant_id, phone_e164: phone, name: customer_name.trim() }, { onConflict: "tenant_id,phone_e164" })
+      .select("id")
+      .single();
+
+    if (customerError || !customer) return { error: "No pude registrar al cliente." };
+
+    const { createAgentBookingServices } = await import("@/domain/booking/agentBookingServices");
+    const booking = createAgentBookingServices({
+      db,
+      tenantId: tenant_id,
+      customerId: customer.id,
+      customerPhone: phone,
+      timezone,
+      calendarSync: { sync: async () => undefined, delete: async () => undefined },
+    });
+
+    const result = await booking.reservations.createReservation({
+      date,
+      time,
+      customer_name: customer_name.trim(),
+      sport_name,
+      status,
+    });
+
+    if (!result.ok) return { error: result.reply };
+
+    revalidatePath(`/tenants/${tenant_id}/reservations`);
+    revalidatePath(`/tenants/${tenant_id}/calendar`);
+    return { ok: true };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "No pude crear la reserva." };
+  }
+}
+
+const RescheduleSchema = z.object({
+  tenant_id: z.string().uuid(),
+  reservation_id: z.string().uuid(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  time: z.string().regex(/^\d{2}:\d{2}$/),
+  sport_name: z.string().min(1),
+});
+
+/** Moves a reservation to another date/time and/or court from the panel. */
+export async function rescheduleReservationFromPanel(
+  _prev: unknown,
+  formData: FormData,
+): Promise<{ ok?: boolean; error?: string }> {
+  const parsed = RescheduleSchema.safeParse(Object.fromEntries(formData.entries()));
+  if (!parsed.success) return { error: "Revisá la fecha, la hora y la cancha." };
+
+  const { tenant_id, reservation_id, date, time, sport_name } = parsed.data;
+
+  try {
+    const db = createServerClient();
+    const { data: reservation } = await db
+      .from("reservations")
+      .select("customer_id")
+      .eq("id", reservation_id)
+      .eq("tenant_id", tenant_id)
+      .maybeSingle();
+
+    if (!reservation?.customer_id) return { error: "No encontré esa reserva." };
+
+    const { data: tenant } = await db.from("tenants").select("timezone").eq("id", tenant_id).maybeSingle();
+    const { data: customer } = await db
+      .from("customers")
+      .select("phone_e164")
+      .eq("id", reservation.customer_id)
+      .maybeSingle();
+
+    const { createAgentBookingServices } = await import("@/domain/booking/agentBookingServices");
+    const booking = createAgentBookingServices({
+      db,
+      tenantId: tenant_id,
+      customerId: reservation.customer_id,
+      customerPhone: customer?.phone_e164 ?? "",
+      timezone: tenant?.timezone ?? "America/Argentina/Buenos_Aires",
+      calendarSync: { sync: async () => undefined, delete: async () => undefined },
+    });
+
+    const result = await booking.reservations.rescheduleMany([reservation_id], date, time, sport_name);
+    if (!result.ok) return { error: result.reply };
+
+    revalidatePath(`/tenants/${tenant_id}/reservations`);
+    revalidatePath(`/tenants/${tenant_id}/calendar`);
+    return { ok: true };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "No pude reprogramar la reserva." };
+  }
 }

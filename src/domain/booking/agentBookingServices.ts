@@ -766,10 +766,15 @@ export class AgentReservationCommandService {
     return `✅ Reserva reprogramada: ${court.sport_name} (${describeCourtUnit(courtUnit)}) para el ${dateLabel} hs.`;
   }
 
+  /**
+   * @param targetCourt When the customer is also switching sport/court, every
+   * reservation is validated against this court instead of its current one.
+   */
   async validateRescheduleMany(
     reservationIds: string[],
     date: string,
     time: string,
+    targetCourt?: ReservableCourt,
   ): Promise<{ ok: true; reservations: CustomerReservation[] } | { ok: false; reply: string; reservations?: CustomerReservation[] }> {
     const reservations = await this.findActiveByIds(reservationIds);
     if (!reservations.length) return { ok: false, reply: "No encontré reservas activas a tu nombre con esos datos." };
@@ -793,13 +798,19 @@ export class AgentReservationCommandService {
       }
     }
 
+    // Moving to another sport puts every reservation on the same target court,
+    // so they are validated as a single group against its capacity.
     const byCourtType = new Map<string, CustomerReservation[]>();
-    for (const reservation of reservations) {
-      byCourtType.set(reservation.court_type_id, [...(byCourtType.get(reservation.court_type_id) ?? []), reservation]);
+    if (targetCourt) {
+      byCourtType.set(targetCourt.id, reservations);
+    } else {
+      for (const reservation of reservations) {
+        byCourtType.set(reservation.court_type_id, [...(byCourtType.get(reservation.court_type_id) ?? []), reservation]);
+      }
     }
 
     for (const group of byCourtType.values()) {
-      const court = relationOne(group[0].court_types);
+      const court = targetCourt ?? relationOne(group[0].court_types);
       if (!court) return { ok: false, reply: "No pude identificar el tipo de cancha de una reserva.", reservations };
 
       const dayError = this.availability.assertCourtWorksOnDate(court, date);
@@ -829,19 +840,33 @@ export class AgentReservationCommandService {
     return { ok: true, reservations };
   }
 
+  /**
+   * @param newSport Optional: move the reservation to a different sport/court.
+   * Availability on the target court is validated the same way as a new booking.
+   */
   async rescheduleMany(
     reservationIds: string[],
     date: string,
     time: string,
+    newSport?: string,
   ): Promise<{ ok: boolean; reply: string; rescheduledIds: string[] }> {
-    const validation = await this.validateRescheduleMany(reservationIds, date, time);
+    let targetCourt: ReservableCourt | undefined;
+    if (newSport) {
+      const courts = await this.availability.fetchReservableCourts(newSport);
+      if (!courts.length) {
+        return { ok: false, reply: `No encontré el deporte "${newSport}". Verificá el nombre.`, rescheduledIds: [] };
+      }
+      targetCourt = courts[0];
+    }
+
+    const validation = await this.validateRescheduleMany(reservationIds, date, time, targetCourt);
     if (!validation.ok) return { ok: false, reply: validation.reply, rescheduledIds: [] };
 
     const rescheduledIds: string[] = [];
     const updatedReservations: CustomerReservation[] = [];
 
     for (const reservation of validation.reservations) {
-      const court = relationOne(reservation.court_types);
+      const court = targetCourt ?? relationOne(reservation.court_types);
       if (!court) return { ok: false, reply: "No pude identificar el tipo de cancha de una reserva.", rescheduledIds };
 
       const { startsAt, endsAt } = this.availability.buildReservationRange(court, date, time);
@@ -851,6 +876,7 @@ export class AgentReservationCommandService {
       const { data: updated, error } = await this.context.db
         .from("reservations")
         .update({
+          court_type_id: court.id,
           starts_at: startsAt.toISOString(),
           ends_at: endsAt.toISOString(),
           notes: courtUnit.name,

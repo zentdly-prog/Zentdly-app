@@ -111,15 +111,16 @@ export const AGENT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "reschedule_reservation",
       description:
-        "Mueve una reserva existente a otro día/horario. Necesitás reservation_id O fecha+horario actual para identificarla, más new_date y new_time.",
+        "Mueve una reserva existente a otro día/horario y/o a otra cancha o deporte. Necesitás reservation_id O fecha+horario actual para identificarla. Si el cliente solo quiere cambiar de cancha sin cambiar el horario, pasá new_date y new_time con los valores actuales de la reserva y new_sport con la cancha nueva.",
       parameters: {
         type: "object",
         properties: {
           reservation_id: { type: "string" },
           current_date: { type: "string", description: "YYYY-MM-DD de la reserva actual (alternativa a reservation_id)" },
           current_time: { type: "string", description: "HH:mm de la reserva actual" },
-          new_date: { type: "string", description: "YYYY-MM-DD del nuevo horario" },
-          new_time: { type: "string", description: "HH:mm del nuevo horario" },
+          new_date: { type: "string", description: "YYYY-MM-DD del nuevo horario (si no cambia, repetí el actual)" },
+          new_time: { type: "string", description: "HH:mm del nuevo horario (si no cambia, repetí el actual)" },
+          new_sport: { type: "string", description: "Nombre de la cancha/deporte destino. Solo si el cliente quiere cambiar de cancha." },
         },
         required: ["new_date", "new_time"],
         additionalProperties: false,
@@ -292,6 +293,7 @@ export async function executeTool(
         candidates.map((r) => r.id),
         newDate,
         newTime,
+        args.new_sport ? String(args.new_sport) : undefined,
       );
       return result.reply;
     }
