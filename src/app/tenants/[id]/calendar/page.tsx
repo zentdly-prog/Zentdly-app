@@ -141,11 +141,17 @@ export default async function CalendarPage({
                             return (
                               <div
                                 key={reservation.id}
-                                className={`rounded-md px-2 py-1 text-xs ${styles.container}`}
+                                className={`rounded-md px-2 py-1 text-xs flex items-center justify-between gap-2 ${styles.container}`}
                                 title={statusLabel(reservation.status)}
                               >
-                                <span className={styles.text}>
+                                <span className={`${styles.text} truncate`}>
                                   {formatInTimeZone(new Date(reservation.starts_at), tz, "HH:mm")} · {customer?.name || customer?.phone_e164 || "Cliente"}
+                                </span>
+                                {/* Spelled out, not just colour-coded: the tooltip is
+                                    invisible on touch screens and colour alone is not
+                                    readable for everyone. */}
+                                <span className={`${styles.text} shrink-0 opacity-80 text-[10px] uppercase tracking-wide`}>
+                                  {statusShort(reservation.status)}
                                 </span>
                               </div>
                             );
@@ -186,8 +192,19 @@ function statusLabel(status: string): string {
   switch (status) {
     case "pending": return "Pendiente (esperando seña)";
     case "cancelled": return "Cancelada";
-    case "completed": return "Completada";
+    case "completed": return "Realizada";
     case "confirmed": return "Confirmada";
+    default: return status;
+  }
+}
+
+/** Compact label that fits inside a reservation chip. */
+function statusShort(status: string): string {
+  switch (status) {
+    case "pending": return "Pend.";
+    case "cancelled": return "Canc.";
+    case "completed": return "Realiz.";
+    case "confirmed": return "Conf.";
     default: return status;
   }
 }
