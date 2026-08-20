@@ -16,6 +16,8 @@ export interface AgentToolDeps {
   customerPhone: string;
   timezone: string;
   conversationId: string;
+  /** Image the customer just sent, when there is one, so a receipt can be emailed. */
+  receiptImage?: { base64: string; mimetype: string };
   calendarSync?: {
     sync(reservation: CalendarSyncReservation, customerName: string, customerPhone: string, tz: string): Promise<void>;
     delete(externalEventId: string | null, tz: string): Promise<void>;
@@ -63,18 +65,23 @@ export const AGENT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "confirm_deposit",
+      name: "report_deposit_receipt",
       description:
-        "Confirma una reserva pendiente cuando el cliente mandó el comprobante de la seña. Si no se especifican reservation_ids, confirma todas las pendientes recientes del cliente.",
+        "Usá esto cuando el cliente manda el comprobante de la seña. NO confirma la reserva: registra que llegó el comprobante y se lo manda por mail al negocio para que una persona lo valide. Pasá en 'detalle' lo que leas del comprobante (monto, banco, fecha, número de operación).",
       parameters: {
         type: "object",
         properties: {
+          detalle: {
+            type: "string",
+            description: "Lo que se ve en el comprobante: monto, banco o billetera, fecha, destinatario, número de operación.",
+          },
           reservation_ids: {
             type: "array",
             items: { type: "string" },
-            description: "IDs de las reservas a confirmar. Opcional — sin esto confirma todas las pendientes.",
+            description: "IDs de las reservas a las que corresponde. Opcional — sin esto aplica a todas las pendientes del cliente.",
           },
         },
+        required: ["detalle"],
         additionalProperties: false,
       },
     },
@@ -219,11 +226,58 @@ export async function executeTool(
       return results.join("\n---\n");
     }
 
-    case "confirm_deposit": {
-      const reservationIds = Array.isArray(args.reservation_ids)
+    case "report_deposit_receipt": {
+      const { sendDepositReceiptAlert } = await import("@/integrations/email/resendSender");
+      const detalle = String(args.detalle ?? "").trim() || "El cliente mandó un comprobante.";
+      const ids = Array.isArray(args.reservation_ids)
         ? (args.reservation_ids as string[]).filter(Boolean)
         : undefined;
-      return booking.reservations.confirmPending({ reservation_ids: reservationIds });
+
+      const pending = await booking.reservations.findPendingForReceipt(ids);
+      if (!pending.length) {
+        return "El cliente no tiene ninguna reserva pendiente de seña. Preguntale a qué reserva corresponde el comprobante; no inventes una.";
+      }
+
+      // Money decisions belong to a person: this only records that a receipt
+      // arrived. The reservation stays pending until someone validates it.
+      await deps.db
+        .from("reservations")
+        .update({ deposit_receipt_at: new Date().toISOString(), deposit_receipt_note: detalle.slice(0, 500) })
+        .in("id", pending.map((r) => r.id));
+
+      const [{ data: tenant }, { data: customer }] = await Promise.all([
+        deps.db.from("tenants").select("name, contact_email").eq("id", deps.tenantId).single(),
+        deps.db.from("customers").select("name").eq("id", deps.customerId).single(),
+      ]);
+
+      const mail = tenant?.contact_email
+        ? await sendDepositReceiptAlert({
+            to: tenant.contact_email as string,
+            businessName: (tenant.name as string) ?? "el complejo",
+            customerName: (customer?.name as string) ?? "Cliente",
+            customerPhone: deps.customerPhone,
+            reservationSummary: booking.reservations.formatReservations(pending),
+            agentNote: detalle,
+            image: deps.receiptImage,
+          })
+        : { ok: false, error: "El negocio no tiene email de contacto cargado." };
+
+      await logAgentEvent(deps.db, {
+        tenantId: deps.tenantId,
+        conversationId: deps.conversationId,
+        customerId: deps.customerId,
+        eventType: "deposit_receipt_received",
+        payload: {
+          detalle,
+          reservations: pending.map((r) => r.id),
+          emailSent: mail.ok,
+          emailError: mail.ok ? undefined : mail.error,
+          emailVia: mail.via,
+          hadImage: Boolean(deps.receiptImage),
+        },
+      });
+
+      return "Registré el comprobante y se lo pasé al complejo para que lo revisen. Te confirmo apenas lo validen.";
     }
 
     case "list_my_reservations": {

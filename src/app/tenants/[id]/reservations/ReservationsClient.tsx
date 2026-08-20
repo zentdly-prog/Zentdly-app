@@ -5,6 +5,7 @@ import { formatInTimeZone } from "date-fns-tz";
 import {
   createManualReservation,
   rescheduleReservationFromPanel,
+  reviewDepositReceipt,
   updateReservationStatus,
 } from "@/lib/actions/reservationsPanel";
 import { Alert } from "@/components/Alert";
@@ -23,6 +24,10 @@ export type PanelReservation = {
   status: string;
   notes: string | null;
   court_type_id: string;
+  deposit_receipt_at?: string | null;
+  deposit_receipt_note?: string | null;
+  deposit_reviewed_at?: string | null;
+  deposit_reviewed_by?: string | null;
   customers?: Relation<{ name: string | null; phone_e164: string | null }>;
   court_types?: Relation<{ sport_name: string | null }>;
 };
@@ -56,6 +61,7 @@ export default function ReservationsClient({
 }) {
   const [createState, createAction] = useActionState(createManualReservation, null);
   const [editState, editAction] = useActionState(rescheduleReservationFromPanel, null);
+  const [reviewState, reviewAction] = useActionState(reviewDepositReceipt, null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -79,6 +85,8 @@ export default function ReservationsClient({
       {createState?.ok && <Alert type="success" message="Reserva creada." />}
       {editState?.error && <Alert type="error" message={editState.error} />}
       {editState?.ok && <Alert type="success" message="Reserva actualizada." />}
+      {reviewState?.error && <Alert type="error" message={reviewState.error} />}
+      {reviewState?.ok && <Alert type="success" message="Seña revisada." />}
 
       {showForm && (
         <form action={createAction} className="mb-6 bg-white rounded-xl border border-gray-200 p-4 space-y-3">
@@ -164,6 +172,39 @@ export default function ReservationsClient({
                     </div>
                   </div>
 
+                  {conversationNeedsReview(reservation) && (
+                    <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                      <p className="text-sm font-semibold text-amber-900">Comprobante de seña para revisar</p>
+                      {reservation.deposit_receipt_note && (
+                        <p className="mt-1 text-xs text-amber-900 bg-white border border-amber-200 rounded px-2 py-1">
+                          {reservation.deposit_receipt_note}
+                        </p>
+                      )}
+                      <p className="mt-1 text-[11px] text-amber-700">
+                        Recibido {new Date(reservation.deposit_receipt_at!).toLocaleString("es-AR")} · el comprobante
+                        se envió por mail al negocio.
+                      </p>
+                      <div className="mt-2 flex gap-2">
+                        <form action={reviewAction}>
+                          <input type="hidden" name="tenant_id" value={tenantId} />
+                          <input type="hidden" name="reservation_id" value={reservation.id} />
+                          <input type="hidden" name="decision" value="accept" />
+                          <button className="px-3 py-1.5 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700">
+                            Validar seña y confirmar
+                          </button>
+                        </form>
+                        <form action={reviewAction}>
+                          <input type="hidden" name="tenant_id" value={tenantId} />
+                          <input type="hidden" name="reservation_id" value={reservation.id} />
+                          <input type="hidden" name="decision" value="reject" />
+                          <button className="px-3 py-1.5 rounded-lg border border-red-300 text-red-700 text-xs hover:bg-red-50">
+                            Rechazar
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  )}
+
                   {isEditing && (
                     <form action={editAction} className="mt-3 rounded-lg bg-gray-50 border border-gray-200 p-3 flex flex-wrap items-end gap-3">
                       <input type="hidden" name="tenant_id" value={tenantId} />
@@ -195,6 +236,11 @@ export default function ReservationsClient({
       </div>
     </div>
   );
+}
+
+/** A receipt arrived and nobody has accepted or rejected it yet. */
+function conversationNeedsReview(r: PanelReservation): boolean {
+  return Boolean(r.deposit_receipt_at) && !r.deposit_reviewed_at;
 }
 
 function Field({

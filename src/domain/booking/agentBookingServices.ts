@@ -984,6 +984,11 @@ export class AgentReservationCommandService {
     return matchCustomerReservationForCancel(data, args);
   }
 
+  /** Pending reservations a receipt could belong to. Public so the receipt tool can reach it. */
+  async findPendingForReceipt(reservationIds?: string[]): Promise<CustomerReservation[]> {
+    return this.findPendingReservations({ reservation_ids: reservationIds });
+  }
+
   private async findPendingReservations(args: {
     reservation_ids?: string[];
     date?: string;

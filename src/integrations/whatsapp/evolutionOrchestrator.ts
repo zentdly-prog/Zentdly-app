@@ -208,10 +208,13 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
   // Pull the actual picture when the customer sent one. Without this the agent
   // only sees the literal text "[image]" and has to guess what it was.
   let imageDataUrl: string | undefined;
+  let receiptImage: { base64: string; mimetype: string } | undefined;
   if (msg.messageType === "image" || msg.messageType === "document") {
     const media = await fetchMediaAsDataUrl(msg.instanceName, msg.messageId);
     if (media) {
       imageDataUrl = media.dataUrl;
+      // Kept separately so the receipt tool can attach the original to an email.
+      receiptImage = { base64: media.dataUrl.split(",")[1] ?? "", mimetype: media.mimetype };
       await logAgentEvent(db, {
         tenantId,
         conversationId: conversation.id,
@@ -236,6 +239,7 @@ export async function handleEvolutionMessage(msg: EvolutionIncomingMessage): Pro
         customerPhone: `+${msg.from}`,
         timezone,
         conversationId: conversation.id,
+        receiptImage,
         calendarSync: {
           sync: async () => undefined,
           delete: async () => undefined,

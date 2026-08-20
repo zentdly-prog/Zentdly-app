@@ -75,11 +75,19 @@ export interface SmtpResult {
   authFailed?: boolean;
 }
 
+export interface MailAttachment {
+  filename: string;
+  /** Raw base64, without the data: prefix. */
+  content: string;
+  contentType: string;
+}
+
 export async function sendMailViaSmtp(options: {
   to: string;
   subject: string;
   html: string;
   text: string;
+  attachments?: MailAttachment[];
 }): Promise<SmtpResult> {
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASSWORD;
@@ -93,6 +101,12 @@ export async function sendMailViaSmtp(options: {
       subject: options.subject,
       text: options.text,
       html: options.html,
+      attachments: options.attachments?.map((a) => ({
+        filename: a.filename,
+        content: a.content,
+        encoding: "base64",
+        contentType: a.contentType,
+      })),
     });
     return { ok: true };
   } catch (e) {

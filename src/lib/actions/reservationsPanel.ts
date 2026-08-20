@@ -21,7 +21,7 @@ export async function getPanelReservations(
 
     const { data } = await db
       .from("reservations")
-      .select("id, starts_at, ends_at, status, notes, customer_id, court_type_id, customers(name, phone_e164), court_types(sport_name)")
+      .select("id, starts_at, ends_at, status, notes, customer_id, court_type_id, deposit_receipt_at, deposit_receipt_note, deposit_reviewed_at, deposit_reviewed_by, customers(name, phone_e164), court_types(sport_name)")
       .eq("tenant_id", tenantId)
       .gte("starts_at", startsFrom.toISOString())
       .lt("starts_at", startsTo.toISOString())
@@ -257,5 +257,63 @@ export async function rescheduleReservationFromPanel(
     return { ok: true };
   } catch (e) {
     return { error: e instanceof Error ? e.message : "No pude reprogramar la reserva." };
+  }
+}
+
+const ReviewDepositSchema = z.object({
+  tenant_id: z.string().uuid(),
+  reservation_id: z.string().uuid(),
+  decision: z.enum(["accept", "reject"]),
+});
+
+/**
+ * A person at the business accepts or rejects a deposit receipt.
+ *
+ * The agent never decides this: it only records that a receipt arrived and
+ * emails it over. Accepting is what finally confirms the reservation.
+ * Available to admins and to the business's own (lite) users alike, since both
+ * reach the Reservations tab.
+ */
+export async function reviewDepositReceipt(
+  _prev: unknown,
+  formData: FormData,
+): Promise<{ ok?: boolean; error?: string }> {
+  const parsed = ReviewDepositSchema.safeParse(Object.fromEntries(formData.entries()));
+  if (!parsed.success) return { error: "Datos inválidos." };
+
+  const { tenant_id, reservation_id, decision } = parsed.data;
+
+  try {
+    const { getSession } = await import("@/lib/session");
+    const session = await getSession();
+    if (!session.valid) return { error: "Sesión vencida. Volvé a entrar." };
+    // A lite user may only review reservations of the business they belong to.
+    if (session.role === "lite" && session.tenantId !== tenant_id) {
+      return { error: "No tenés permiso sobre este negocio." };
+    }
+
+    const db = createServerClient();
+    const reviewed = {
+      deposit_reviewed_at: new Date().toISOString(),
+      deposit_reviewed_by: session.username || session.role,
+    };
+
+    const { error } = await db
+      .from("reservations")
+      .update(
+        decision === "accept"
+          ? { status: "confirmed", ...reviewed }
+          : { status: "cancelled", cancelled_at: new Date().toISOString(), cancelled_by: "panel", ...reviewed },
+      )
+      .eq("id", reservation_id)
+      .eq("tenant_id", tenant_id);
+
+    if (error) return { error: error.message };
+
+    revalidatePath(`/tenants/${tenant_id}/reservations`);
+    revalidatePath(`/tenants/${tenant_id}/calendar`);
+    return { ok: true };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "No pude registrar la revisión." };
   }
 }

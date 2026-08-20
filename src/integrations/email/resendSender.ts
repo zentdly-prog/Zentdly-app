@@ -80,3 +80,72 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
+
+/**
+ * Sends a payment receipt to the business so a person can check it.
+ *
+ * The receipt image travels as an attachment on purpose: whoever reviews it has
+ * to actually see it, and the panel deliberately does not store customer images
+ * (they would bloat the database and are personal data we have no reason to
+ * keep). The reviewer looks at the email, then validates in the panel.
+ */
+export async function sendDepositReceiptAlert(options: {
+  to: string;
+  businessName: string;
+  customerName: string;
+  customerPhone: string;
+  reservationSummary: string;
+  agentNote: string;
+  image?: { base64: string; mimetype: string };
+}): Promise<SendResult> {
+  const { to, businessName, customerName, customerPhone, reservationSummary, agentNote, image } = options;
+  if (!to) return { ok: false, error: "El negocio no tiene email de contacto configurado." };
+
+  const subject = `[${businessName}] Comprobante de seña para revisar — ${customerName}`;
+  const html = `
+    <h2>Un cliente mandó un comprobante de seña</h2>
+    <p><strong>Cliente:</strong> ${escapeHtml(customerName)} (${escapeHtml(customerPhone)})</p>
+    <p><strong>Reserva:</strong><br>${escapeHtml(reservationSummary).replace(/\n/g, "<br>")}</p>
+    <p><strong>Lo que se leyó del comprobante:</strong><br>${escapeHtml(agentNote)}</p>
+    <hr>
+    <p>El comprobante va adjunto. <strong>La reserva sigue pendiente</strong> hasta que la valides
+    desde el panel, en la pestaña Reservas.</p>
+  `;
+  const text =
+    `Un cliente mandó un comprobante de seña\n\n` +
+    `Cliente: ${customerName} (${customerPhone})\n` +
+    `Reserva:\n${reservationSummary}\n\n` +
+    `Lo que se leyó del comprobante:\n${agentNote}\n\n` +
+    `La reserva sigue pendiente hasta que la valides desde el panel, en la pestaña Reservas.`;
+
+  const attachments = image
+    ? [{
+        filename: `comprobante.${image.mimetype.split("/")[1] ?? "jpg"}`,
+        content: image.base64,
+        contentType: image.mimetype,
+      }]
+    : undefined;
+
+  if (isSmtpConfigured()) {
+    const smtp = await sendMailViaSmtp({ to, subject, html, text, attachments });
+    if (smtp.ok) return { ok: true, via: "smtp" };
+    return { ...smtp, via: "smtp" };
+  }
+
+  // Resend is the fallback; it takes attachments in its own shape.
+  if (!process.env.RESEND_API_KEY) return { ok: false, error: "No hay canal de email configurado.", via: "resend" };
+  try {
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    const { error } = await resend.emails.send({
+      from: FROM_EMAIL,
+      to,
+      subject,
+      html,
+      attachments: attachments?.map((a) => ({ filename: a.filename, content: a.content })),
+    });
+    if (error) return { ok: false, error: error.message ?? "Error al enviar.", via: "resend" };
+    return { ok: true, via: "resend" };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Error al enviar.", via: "resend" };
+  }
+}
