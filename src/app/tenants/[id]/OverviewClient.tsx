@@ -1,8 +1,10 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { updateTenant } from "@/lib/actions/tenants";
 import { SubmitButton } from "@/components/SubmitButton";
+import { deleteTenant } from "@/lib/actions/tenants";
+import { useRouter } from "next/navigation";
 import { Alert } from "@/components/Alert";
 
 type Tenant = {
@@ -24,6 +26,13 @@ type Tenant = {
 
 export default function OverviewClient({ tenant }: { tenant: Tenant }) {
   const [state, action] = useActionState(updateTenant, null);
+  const [deleteState, deleteAction] = useActionState(deleteTenant, null);
+  const router = useRouter();
+
+  // Once the business is gone this page has nothing left to show.
+  useEffect(() => {
+    if (deleteState?.ok) router.push("/");
+  }, [deleteState, router]);
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -38,7 +47,7 @@ export default function OverviewClient({ tenant }: { tenant: Tenant }) {
         {/* ── Negocio ── */}
         <Section title="Negocio">
           <Field name="name" label="Nombre del complejo" defaultValue={tenant.name} required />
-          <Field name="slug" label="Slug" hint="Solo minúsculas, números y guiones." defaultValue={tenant.slug} required />
+          <Field name="slug" label="Identificador (slug)" hint="Es también el nombre de la instancia de WhatsApp. Cambiarlo desvincula el número." defaultValue={tenant.slug} required />
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Zona horaria</label>
             <select
@@ -103,6 +112,32 @@ export default function OverviewClient({ tenant }: { tenant: Tenant }) {
           <SubmitButton label="Guardar cambios" />
         </div>
       </form>
+
+      <div className="mt-8 rounded-xl border border-red-200 bg-red-50 p-4">
+        <p className="text-sm font-semibold text-red-900">Borrar este negocio</p>
+        <p className="mt-1 text-xs text-red-800">
+          Se borran sus clientes, conversaciones, mensajes y reservas, y se desvincula su WhatsApp.
+          No se puede deshacer.
+        </p>
+        <form action={deleteAction} className="mt-3 flex flex-wrap items-end gap-2">
+          <input type="hidden" name="tenant_id" value={tenant.id} />
+          <div>
+            <label className="block text-xs text-red-800 mb-1">
+              Escribí <strong>{tenant.name}</strong> para confirmar
+            </label>
+            <input
+              type="text"
+              name="confirm_name"
+              className="px-3 py-2 border border-red-300 rounded-lg text-sm text-gray-900 bg-white"
+              placeholder={tenant.name}
+            />
+          </div>
+          <button className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">
+            Borrar negocio
+          </button>
+        </form>
+        {deleteState?.error && <p className="mt-2 text-xs text-red-700">{deleteState.error}</p>}
+      </div>
     </div>
   );
 }

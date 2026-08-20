@@ -25,14 +25,7 @@ export default function NewTenantPage() {
         <form action={action} className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
           {state?.error && <Alert type="error" message={state.error} />}
 
-          <Field name="name" label="Nombre del complejo" placeholder="Complejo La Bombonera" required />
-          <Field
-            name="slug"
-            label="Slug (identificador único)"
-            placeholder="la-bombonera"
-            hint="Solo minúsculas, números y guiones. Sin espacios."
-            required
-          />
+          <Field name="name" label="Nombre del complejo" placeholder="Complejo La Bombonera" hint="El identificador interno se genera solo a partir del nombre." required />
           <Field name="address" label="Dirección" placeholder="Av. Corrientes 1234, CABA" />
           <Field name="contact_name" label="Nombre del contacto" placeholder="Juan Pérez" />
           <Field name="contact_phone" label="Teléfono del contacto" placeholder="+5491112345678" />
